@@ -44,13 +44,40 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 #include <filesystem>
 #include <map>
 #include <set>
 #include <string>
+
+#ifdef _WIN32
+#include <random>
+/* Windows has no mkdtemp: fill the trailing X's with digits and make the directory. */
+static char * mkdtemp(char * tmpl) {
+  std::random_device entropy;
+  size_t n = strlen(tmpl);
+  for (int attempt = 0; attempt < 100; attempt++) {
+    size_t i;
+    for (i = 0; i < 6 && i < n && tmpl[n - 1 - i] == 'X'; i++) {
+    }
+    if (i != 6) {
+      return NULL;
+    }
+    std::string digits = std::to_string(100000 + entropy() % 900000);
+    memcpy(tmpl + n - 6, digits.data(), 6);
+    std::error_code ec;
+    if (std::filesystem::create_directory(tmpl, ec) && !ec) {
+      return tmpl;
+    }
+    memcpy(tmpl + n - 6, "XXXXXX", 6);
+  }
+  return NULL;
+}
+#endif
 
 namespace {
 
@@ -609,6 +636,9 @@ TEST_F(Site, RoundTrip) {
 }
 
 TEST_F(Site, Readable) {
+#ifdef _WIN32
+  GTEST_SKIP() << "the reader is a separate ELF program started with fork and checked with readelf";
+#else
   char post[GDEFCORE_PUBLIC_ID_LEN + 1];
   char subject[GDEFCORE_PUBLIC_ID_LEN + 1];
   char entity[GDEFCORE_PUBLIC_ID_LEN + 1];
@@ -690,6 +720,7 @@ TEST_F(Site, Readable) {
   EXPECT_EQ(std::string::npos, needed.find("defiant-"));
   gdefstor_bytes_free(NULL, zip);
   memset(raw, 0, sizeof raw);
+#endif
 }
 
 TEST_F(Site, Restore) {
