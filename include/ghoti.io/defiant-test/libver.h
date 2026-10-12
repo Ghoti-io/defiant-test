@@ -20,6 +20,7 @@
 
 /**
  * @file libver.h
+ * @stability free
  *
  * Version numbering and the symbol namespace for the Ghoti.io Defiant Test library.
  *

@@ -99,14 +99,14 @@ static int span_has_id(const char * text, size_t n) {
   }
   while (i < n) {
     if (text[i] == '&' && i + 1 < n && text[i + 1] == '#') {
-      i += 2;
-      while (i < n && text[i] != ';') {
-        i += 1;
+      size_t j = i + 2;
+      while (j < n && text[j] != ';') {
+        j += 1;
       }
-      if (i < n) {
-        i += 1;
+      if (j < n) {
+        i = j + 1;
+        continue;
       }
-      continue;
     }
     if (text[i] >= '0' && text[i] <= '9') {
       size_t start = i;

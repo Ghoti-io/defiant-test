@@ -20,6 +20,7 @@
 
 /**
  * @file allocator.h
+ * @stability free
  *
  * Allocator abstraction for the Ghoti.io Defiant Test library.
  *

@@ -21,6 +21,7 @@
 /**
  * @file macros.h
  * @brief Cross-compiler macros and utilities for the Ghoti.io Defiant Test library
+ * @stability free
  *
  * This header provides cross-compiler macros for common functionality
  * such as marking unused parameters, deprecated functions, and utility

@@ -28,6 +28,7 @@
 #include <ghoti.io/archive/reader.h>
 #include <ghoti.io/archive/stream.h>
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -83,9 +84,14 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "readzip: cannot read %s\n", argv[1]);
     return 1;
   }
-  if (garc_stream_create_memory(bytes, len, &stream) != GARC_OK ||
-      garc_open(stream, NULL, &archive) != GARC_OK) {
+  if (garc_stream_create_memory(bytes, len, &stream) != GARC_OK) {
     fprintf(stderr, "readzip: not a zip\n");
+    free(bytes);
+    return 1;
+  }
+  if (garc_open(stream, NULL, &archive) != GARC_OK) {
+    fprintf(stderr, "readzip: not a zip\n");
+    garc_stream_destroy(stream);
     free(bytes);
     return 1;
   }
@@ -104,8 +110,22 @@ int main(int argc, char ** argv) {
       free(bytes);
       return 1;
     }
-    fwrite(member->name, 1, member->name_length, stdout);
-    fputc('\n', stdout);
+    if ((member->name_length > 0 &&
+            fwrite(member->name, 1, member->name_length, stdout) !=
+                member->name_length) ||
+        fputc('\n', stdout) == EOF) {
+      garc_close(archive);
+      garc_stream_destroy(stream);
+      free(bytes);
+      return 1;
+    }
+    if (member->size > SIZE_MAX) {
+      fprintf(stderr, "readzip: member too large\n");
+      garc_close(archive);
+      garc_stream_destroy(stream);
+      free(bytes);
+      return 1;
+    }
     if (member->size == 0 || member->type != GARC_MEMBER_FILE) {
       continue;
     }
@@ -129,8 +149,14 @@ int main(int argc, char ** argv) {
       }
       got_total += got;
     }
-    fwrite(body, 1, got_total, stdout);
-    fputc('\n', stdout);
+    if ((got_total > 0 && fwrite(body, 1, got_total, stdout) != got_total) ||
+        fputc('\n', stdout) == EOF) {
+      free(body);
+      garc_close(archive);
+      garc_stream_destroy(stream);
+      free(bytes);
+      return 1;
+    }
     free(body);
   }
   garc_close(archive);

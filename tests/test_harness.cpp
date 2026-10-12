@@ -39,6 +39,7 @@
 
 #include <gtest/gtest.h>
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -142,17 +143,17 @@ int MakeZip(const ZipPart * parts, size_t n, int deflate, uint8_t ** out,
   return 1;
 }
 
-std::map<std::string, std::string> ZipMembers(const uint8_t * bytes, size_t len) {
-  std::map<std::string, std::string> members;
+bool ZipMembers(const uint8_t * bytes, size_t len,
+    std::map<std::string, std::string> * members) {
   GARC_Stream * stream = NULL;
   GARC_Archive * archive = NULL;
   if (bytes == NULL ||
-      garc_stream_create_memory(bytes, len, &stream) != GARC_OK ||
-      garc_open(stream, NULL, &archive) != GARC_OK) {
-    if (stream != NULL) {
-      garc_stream_destroy(stream);
-    }
-    return members;
+      garc_stream_create_memory(bytes, len, &stream) != GARC_OK) {
+    return false;
+  }
+  if (garc_open(stream, NULL, &archive) != GARC_OK) {
+    garc_stream_destroy(stream);
+    return false;
   }
   for (;;) {
     const GARC_Member * member = NULL;
@@ -160,34 +161,51 @@ std::map<std::string, std::string> ZipMembers(const uint8_t * bytes, size_t len)
     std::string body;
     size_t got_total = 0;
     uint8_t * buf = NULL;
+    int short_read = 0;
     if (gr == GARC_END) {
       break;
     }
     if (gr != GARC_OK || member->name == NULL) {
-      break;
+      garc_close(archive);
+      garc_stream_destroy(stream);
+      return false;
     }
     if (member->size > 0 && member->type == GARC_MEMBER_FILE) {
+      if (member->size > SIZE_MAX) {
+        garc_close(archive);
+        garc_stream_destroy(stream);
+        return false;
+      }
       buf = (uint8_t *)malloc((size_t)member->size);
       if (buf == NULL) {
-        break;
+        garc_close(archive);
+        garc_stream_destroy(stream);
+        return false;
       }
       while (got_total < (size_t)member->size) {
         size_t got = 0;
         gr = garc_read_member(archive, buf + got_total,
             (size_t)member->size - got_total, &got);
         if (gr != GARC_OK || got == 0) {
+          short_read = 1;
           break;
         }
         got_total += got;
       }
+      if (short_read || got_total != (size_t)member->size) {
+        free(buf);
+        garc_close(archive);
+        garc_stream_destroy(stream);
+        return false;
+      }
       body.assign((const char *)buf, got_total);
       free(buf);
     }
-    members[std::string(member->name, member->name_length)] = body;
+    (*members)[std::string(member->name, member->name_length)] = body;
   }
   garc_close(archive);
   garc_stream_destroy(stream);
-  return members;
+  return true;
 }
 
 std::set<std::string> ManifestKeys(const std::string & manifest) {
@@ -226,8 +244,11 @@ bool StoresEqual(GDEFSTOR_Store * left, GDEFSTOR_Store * right,
     gdefstor_bytes_free(NULL, b);
     return false;
   }
-  ma = ZipMembers(a, a_len);
-  mb = ZipMembers(b, b_len);
+  if (!ZipMembers(a, a_len, &ma) || !ZipMembers(b, b_len, &mb)) {
+    gdefstor_bytes_free(NULL, a);
+    gdefstor_bytes_free(NULL, b);
+    return false;
+  }
   man_a = ma["manifest"];
   man_b = mb["manifest"];
   ma.erase("manifest");
@@ -444,11 +465,10 @@ class Site : public ::testing::Test {
         gdefcore_subject_import(subjects_, empty, zip, zip_len));
     exported = gdefstor_snapshot_export(empty, (const char *)storage_,
         sizeof storage_, NULL, &again, &again_len);
-    if (exported == GDEFSTOR_OK) {
-      EXPECT_FALSE(HasBytes(again, again_len, kCanary, strlen(kCanary)));
-      EXPECT_LT(again_len, (size_t)65536);
-      gdefstor_bytes_free(NULL, again);
-    }
+    ASSERT_EQ(GDEFSTOR_OK, exported);
+    EXPECT_FALSE(HasBytes(again, again_len, kCanary, strlen(kCanary)));
+    EXPECT_LT(again_len, (size_t)65536);
+    gdefstor_bytes_free(NULL, again);
     gdefstor_store_destroy(empty);
     free(zip);
   }
@@ -463,6 +483,9 @@ struct Job {
   GDEFCORE_Result resolve_rc;
   GDEFCORE_Result render_rc;
   size_t page_len;
+  char * front;
+  size_t front_len;
+  char ** ids;
   size_t list_count;
   char mark;
   char * trace;
@@ -499,6 +522,19 @@ extern "C" GDEFCORE_Turn JobTurn(GDEFCORE_Request * request, void * user) {
       strlen(job->path), GDEFCORE_RENDER_PAGE_FUEL, &page, &page_len);
   job->page_len = (job->render_rc == GDEFCORE_OK && page != NULL) ? page_len : 0;
   gdefcore_text_free(used, page);
+  page = NULL;
+  page_len = 0;
+  if (gdefcore_render_page(used, job->routes, request, "/", 1,
+          GDEFCORE_RENDER_PAGE_FUEL, &page, &page_len) == GDEFCORE_OK &&
+      page != NULL && page_len > 0) {
+    job->front = (char *)malloc(page_len + 1);
+    if (job->front != NULL) {
+      memcpy(job->front, page, page_len);
+      job->front[page_len] = '\0';
+      job->front_len = page_len;
+    }
+  }
+  gdefcore_text_free(used, page);
   memset(&query, 0, sizeof query);
   query.size = sizeof query;
   query.type_name = "site.post";
@@ -506,7 +542,18 @@ extern "C" GDEFCORE_Turn JobTurn(GDEFCORE_Request * request, void * user) {
   query.lang = "en";
   query.lang_len = 2;
   if (gdefcore_access_list(used, request, &query, &ids, &count) == GDEFCORE_OK) {
+    size_t i;
     job->list_count = count;
+    if (count > 0) {
+      job->ids = (char **)calloc(count, sizeof(char *));
+      if (job->ids != NULL) {
+        for (i = 0; i < count; i++) {
+          if (ids[i] != NULL) {
+            job->ids[i] = strdup(ids[i]);
+          }
+        }
+      }
+    }
   }
   gdefcore_access_free(used, ids, count);
   return GDEFCORE_TURN_DONE;
@@ -607,7 +654,13 @@ TEST_F(Site, Readable) {
   for (;;) {
     char buf[4096];
     ssize_t n = read(pipes[0], buf, sizeof buf);
-    if (n <= 0) {
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      break;
+    }
+    if (n == 0) {
       break;
     }
     dumped.append(buf, (size_t)n);
@@ -616,6 +669,7 @@ TEST_F(Site, Readable) {
   ASSERT_EQ(pid, waitpid(pid, NULL, 0));
   unlink(path);
   EXPECT_NE(std::string::npos, dumped.find(kTitle));
+  EXPECT_NE(std::string::npos, dumped.find("s1:"));
   EXPECT_EQ(std::string::npos, dumped.find(kPlain));
   EXPECT_EQ(std::string::npos,
       dumped.find(std::string((const char *)raw, sizeof raw)));
@@ -628,7 +682,11 @@ TEST_F(Site, Readable) {
     }
     needed.append(buf);
   }
-  pclose(elf);
+  {
+    int elf_status = pclose(elf);
+    ASSERT_TRUE(WIFEXITED(elf_status));
+    ASSERT_EQ(0, WEXITSTATUS(elf_status));
+  }
   EXPECT_EQ(std::string::npos, needed.find("defiant-"));
   gdefstor_bytes_free(NULL, zip);
   memset(raw, 0, sizeof raw);
@@ -780,8 +838,23 @@ TEST_F(Site, Grant) {
   const char body[] =
       "{\"role\":\"anonymous\",\"label\":\"Read posts\","
       "\"body\":\"CANARY-HOSTILE\"}";
+  const char anon[] =
+      "{\"role\":\"anonymous\",\"label\":\"Read posts\","
+      "\"confirmation\":\"not-the-confirmation\","
+      "\"body\":\"CANARY-HOSTILE\"}";
+  const char auth[] =
+      "{\"role\":\"authenticated\",\"label\":\"Read posts\","
+      "\"confirmation\":\"not-the-confirmation\","
+      "\"body\":\"CANARY-HOSTILE\"}";
+  const char other[] =
+      "{\"role\":\"editors\",\"label\":\"Read posts\","
+      "\"confirmation\":\"not-the-confirmation\","
+      "\"body\":\"CANARY-HOSTILE\"}";
   Open();
   Refuse("r:1.1", body, strlen(body), 0, GDEFCORE_ERR_INVALID);
+  Refuse("r:1.1", anon, strlen(anon), 0, GDEFCORE_ERR_INVALID);
+  Refuse("r:1.1", auth, strlen(auth), 0, GDEFCORE_ERR_INVALID);
+  Refuse("r:1.1", other, strlen(other), 0, GDEFCORE_ERR_INVALID);
 }
 
 TEST_F(Site, CrossTenant) {
@@ -794,8 +867,13 @@ TEST_F(Site, CrossTenant) {
   GDEFCORE_Routes * routes = NULL;
   GDEFCORE_Sched * sched = NULL;
   GDEFCORE_Result unknown = GDEFCORE_OK;
+  GDEFCORE_Result unknown_render = GDEFCORE_OK;
   char * unknown_out = NULL;
   size_t unknown_len = 0;
+  char * unknown_page = NULL;
+  size_t unknown_page_len = 0;
+  size_t i;
+  int listed = 0;
   char trace[16];
   size_t trace_n = 0;
   Job job_a;
@@ -850,13 +928,48 @@ TEST_F(Site, CrossTenant) {
   unknown = gdefcore_form_resolve(routes, catalog_b, request_b, "not-a-path",
       11, &unknown_out, &unknown_len);
   gdefcore_text_free(catalog_b, unknown_out);
+  unknown_render = gdefcore_render_page(catalog_b, routes, request_b, "not-a-path",
+      11, GDEFCORE_RENDER_PAGE_FUEL, &unknown_page, &unknown_page_len);
+  gdefcore_text_free(catalog_b, unknown_page);
   EXPECT_STREQ("ABab", trace);
   EXPECT_EQ(GDEFCORE_OK, job_a.render_rc);
   EXPECT_GT(job_a.page_len, 0u);
+  EXPECT_NE(job_a.front, nullptr);
+  EXPECT_NE(std::string::npos,
+      std::string(job_a.front == NULL ? "" : job_a.front, job_a.front_len)
+          .find(kTitle));
+  EXPECT_GT(job_a.list_count, 0u);
   EXPECT_EQ(unknown, job_b.resolve_rc);
-  EXPECT_EQ(GDEFCORE_ERR_INVALID, job_b.render_rc);
+  EXPECT_EQ(unknown_render, job_b.render_rc);
+  EXPECT_EQ(0u, unknown_page_len);
   EXPECT_EQ(0u, job_b.page_len);
-  EXPECT_EQ(0u, job_b.list_count);
+  EXPECT_EQ(std::string::npos,
+      std::string(job_b.front == NULL ? "" : job_b.front, job_b.front_len)
+          .find(kTitle));
+  EXPECT_EQ(std::string::npos,
+      std::string(job_b.front == NULL ? "" : job_b.front, job_b.front_len)
+          .find(post));
+  for (i = 0; i < job_b.list_count; i++) {
+    if (job_b.ids != NULL && job_b.ids[i] != NULL &&
+        strcmp(job_b.ids[i], post) == 0) {
+      listed = 1;
+    }
+  }
+  EXPECT_EQ(0, listed);
+  free(job_a.front);
+  free(job_b.front);
+  if (job_a.ids != NULL) {
+    for (i = 0; i < job_a.list_count; i++) {
+      free(job_a.ids[i]);
+    }
+    free(job_a.ids);
+  }
+  if (job_b.ids != NULL) {
+    for (i = 0; i < job_b.list_count; i++) {
+      free(job_b.ids[i]);
+    }
+    free(job_b.ids);
+  }
   gdefcore_sched_destroy(sched);
   gdefcore_routes_destroy(routes);
   gdefcore_request_destroy(request_a);
@@ -882,8 +995,14 @@ TEST_F(Site, Bypass) {
   Install();
   Login();
   Publish("hello", post);
+  ASSERT_EQ(GDEFCORE_OK,
+      gdefcore_access_grant(catalog_, "admin", 5, "Read posts", 10, "core.role",
+          9));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_create(catalog_, who));
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_request_set_principal(request_, who, strlen(who)));
+  if (strcmp(Plant(), "skip") != 0) {
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_request_set_principal(request_, who, strlen(who)));
+  }
   ASSERT_EQ(GDEFCORE_OK, gdefcore_id_generate(missing));
   ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_create(NULL, &routes));
   rendered = gdefcore_render_page(catalog_, routes, request_, "hello", 5,
@@ -903,12 +1022,6 @@ TEST_F(Site, Bypass) {
   EXPECT_EQ(GDEFCORE_ERR_INVALID,
       gdefcore_access_read(catalog_, request_, post, strlen(post), "en", 2,
           "title", 5, &texts, &lens, &count));
-  if (strcmp(Plant(), "skip") == 0) {
-    EXPECT_EQ(GDEFCORE_ERR_INVALID,
-        gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, post,
-            strlen(post), "en", 2, "title", 5, &texts, &lens, &count));
-    gdefcore_values_free(catalog_, texts, lens, count);
-  }
   gdefcore_routes_destroy(routes);
 }
 

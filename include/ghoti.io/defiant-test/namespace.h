@@ -21,6 +21,7 @@
 /**
  * @file namespace.h
  * @brief Maps every public name into this build's version namespace.
+ * @stability free
  */
 
 #ifndef GHOTI_IO_GDEFTEST_NAMESPACE_H
