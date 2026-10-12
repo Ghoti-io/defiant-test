@@ -1,0 +1,7 @@
+Name: Ghoti.io Defiant Test(BRANCH)
+Description: Snapshot harness and the milestone gates for Defiant
+Version: (VERSION)
+URL: https://github.com/Ghoti-io/defiant-test
+Libs: -L(PC_LIB_DIR) -l(SUITE)-(PROJECT)(BRANCH)
+CFlags: -I(PC_INCLUDE_DIR)
+Requires: (REQUIRES)
