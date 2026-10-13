@@ -444,7 +444,7 @@ TESTFLAGS := `PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --libs --cfla
 # coverage target does, because --coverage links the gcov runtime, whose
 # mangle_path check-symbols is right to reject in a shipping library and
 # wrong to reject in an instrumented one. Spelled as text's TEST_GATES is.
-TEST_GATES ?= check-symbols check-aliasing check-gates
+TEST_GATES ?= check-symbols check-aliasing check-seams check-gates check-archive check-lint
 
 # Valgrind flags (exclude "still reachable" as it's not a leak)
 # --suppressions: see tests/valgrind.supp. It holds allocations that are
@@ -663,7 +663,7 @@ $(APP_DIR)/examples/%$(EXE_EXTENSION): examples/%.c $(APP_DIR)/$(STATIC_TARGET) 
 ####################################################################
 
 # General commands
-.PHONY: clean cloc docs docs-pdf examples coverage check-symbols check-aliasing check-gates
+.PHONY: clean cloc docs docs-pdf examples coverage check-symbols check-aliasing check-seams check-gates check-archive check-lint
 # Release build commands
 .PHONY: all install test test-quiet test-asan test-valgrind test-valgrind-quiet test-watch uninstall watch
 # Debug build commands
@@ -730,6 +730,9 @@ TEST_LD_PATH := $(APP_DIR):$(LIB_INSTALL_PATH)/$(SUITE):$(STOR_LD_PATH):$(DEP_LD
 ####################################################################
 # Symbol namespace check
 ####################################################################
+
+check-seams: ## Fail if a subsystem includes another's private header
+	@tools/check-seams.sh .
 
 check-aliasing: ## Fail if the strict-aliasing warning is not actually armed
 # CFLAGS names -fstrict-aliasing and -Wstrict-aliasing=1, and neither spelling
@@ -925,6 +928,21 @@ ifeq ($(OS_NAME), Linux)
 else
 	@printf "check-symbols: skipped (Linux only)\n"
 endif
+
+# The hostile-archive plants edit scratch copies of the two libraries that
+# judge an archive. Their sources are siblings in a workspace or an install
+# tree; point these at them otherwise.
+DEFIANT_CORE_SRC ?= ../defiant-core
+DEFIANT_STORAGE_SRC ?= ../defiant-storage
+
+check-archive: $(APP_DIR)/testHarness$(EXE_EXTENSION) $(APP_DIR)/readzip ## Plants turn the hostile-archive tests red
+	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" GDEFTEST_READZIP="$(APP_DIR)/readzip" tools/check-archive.sh "$(APP_DIR)/testHarness$(EXE_EXTENSION)" "$(DEFIANT_CORE_SRC)" "$(DEFIANT_STORAGE_SRC)" "$(MAKE)" $(if $(PREFIX),PREFIX=$(PREFIX))
+
+# The source trees the unsafe-list lint reads: this library and its siblings.
+DEFIANT_LINT_ROOTS ?= . $(DEFIANT_CORE_SRC) $(DEFIANT_STORAGE_SRC) ../defiant-storage-memory ../defiant-storage-sqlite ../defiant-web
+
+check-lint: $(APP_DIR)/testLinttree$(EXE_EXTENSION) ## The unsafe-list lint over real source, with plants
+	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" tools/check-lint.sh "$(APP_DIR)/testLinttree$(EXE_EXTENSION)" $(DEFIANT_LINT_ROOTS)
 
 $(APP_DIR)/readzip: tests/read_zip.c
 	@mkdir -p $(@D)

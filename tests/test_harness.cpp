@@ -810,9 +810,40 @@ TEST_F(Site, OwnGrants) {
   EXPECT_EQ(1, found);
 }
 
+/* The refusal itself is not enough: a "../x" member is also refused further
+ * in, because it names nothing a snapshot manifest lists, so a check removed
+ * from the archive walk leaves the result code unchanged. What a removed check
+ * would let through is a member name used as a path. The import runs in an
+ * empty directory inside an empty directory, and neither may gain a file. */
 TEST_F(Site, Traversal) {
+  char tmpl[512];
+  char * outer;
+  std::filesystem::path inner;
+  std::filesystem::path before = std::filesystem::current_path();
+  size_t outer_entries = 0;
+  size_t inner_entries = 0;
+  const char * tmp = getenv("TMPDIR");
+  snprintf(tmpl, sizeof tmpl, "%s/gdeftest-traversal-XXXXXX",
+      tmp != NULL && tmp[0] != '\0' ? tmp : "/tmp");
+  outer = mkdtemp(tmpl);
+  ASSERT_NE(outer, nullptr);
+  inner = std::filesystem::path(outer) / "inner";
+  std::filesystem::create_directory(inner);
   Open();
+  std::filesystem::current_path(inner);
   Refuse("../x", kCanary, strlen(kCanary), 0, GDEFCORE_ERR_CORRUPT);
+  std::filesystem::current_path(before);
+  for (const auto & entry : std::filesystem::directory_iterator(outer)) {
+    (void)entry;
+    outer_entries += 1;
+  }
+  for (const auto & entry : std::filesystem::directory_iterator(inner)) {
+    (void)entry;
+    inner_entries += 1;
+  }
+  EXPECT_EQ((size_t)1, outer_entries) << "a member name reached the filesystem";
+  EXPECT_EQ((size_t)0, inner_entries) << "a member name reached the filesystem";
+  std::filesystem::remove_all(outer);
 }
 
 TEST_F(Site, Bomb) {
@@ -1113,11 +1144,11 @@ TEST(Harness, Lint) {
 
 TEST(Harness, LintNames) {
   const char * tokens[] = {
-      "unescaped-output",
-      "unfiltered-read",
-      "string-query",
-      "unsigned-form",
-      "direct-storage",
+      "unescaped-output", // unsafe-list item 1
+      "unfiltered-read",  // unsafe-list item 2
+      "string-query",     // unsafe-list item 3
+      "unsigned-form",    // unsafe-list item 4
+      "direct-storage",   // unsafe-list item 5
   };
   int i;
   for (i = 0; i < 5; i++) {

@@ -30,13 +30,24 @@ make test PREFIX=/path/to/prefix
 ```
 
 `make test` also runs `tools/check-gates.sh`. Each plant is an environment
-value of `GHOTI_DEFTEST_PLANT` and must turn its gate red.
+value of `GHOTI_DEFTEST_PLANT` and must turn its gate red. Two gates plant
+a defect in a scratch copy of source instead: `tools/check-archive.sh` (the
+hostile-archive tests, against copies of defiant-core and defiant-storage) and
+`tools/check-lint.sh` (the unsafe-list lint over every Defiant library's
+source).
 
 ## API
 
-`gdeftest_lint` greps for `unescaped-output`, `unfiltered-read`,
-`string-query`, `unsigned-form`, and `direct-storage`. Items 6 and 7 are
-not in this lint. `gdeftest_response_has_internal_id` reports a decimal
+`gdeftest_lint` greps for the tokens of unsafe-list items 1 to 5, and a
+line that carries the word `unsafe` is clean:
+
+- `unescaped-output`, unsafe-list item 1
+- `unfiltered-read`, unsafe-list item 2
+- `string-query`, unsafe-list item 3
+- `unsigned-form`, unsafe-list item 4
+- `direct-storage`, unsafe-list item 5
+
+Items 6 and 7 are not in this lint. `gdeftest_response_has_internal_id` reports a decimal
 integer standing on its own in a page or an error string. A numeric
 character reference is not one.
 

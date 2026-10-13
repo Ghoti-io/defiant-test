@@ -30,11 +30,11 @@
 #include <string.h>
 
 static const char * kItems[] = {
-    "unescaped-output",
-    "unfiltered-read",
-    "string-query",
-    "unsigned-form",
-    "direct-storage",
+    "unescaped-output", /* unsafe-list item 1 */
+    "unfiltered-read",  /* unsafe-list item 2 */
+    "string-query",     /* unsafe-list item 3 */
+    "unsigned-form",    /* unsafe-list item 4 */
+    "direct-storage",   /* unsafe-list item 5 */
 };
 
 static int line_has(const char * line, size_t n, const char * needle) {

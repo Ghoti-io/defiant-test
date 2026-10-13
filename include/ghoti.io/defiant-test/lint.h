@@ -43,8 +43,13 @@ extern "C" {
 /**
  * @brief Grep @p text for unsafe-list items 1–5.
  *
- * The five constructs are the tokens `unescaped-output`,
- * `unfiltered-read`, `string-query`, `unsigned-form` and `direct-storage`.
+ * The five constructs are these tokens, one per unsafe-list item:
+ * - `unescaped-output` (unsafe-list item 1),
+ * - `unfiltered-read` (unsafe-list item 2),
+ * - `string-query` (unsafe-list item 3),
+ * - `unsigned-form` (unsafe-list item 4) and
+ * - `direct-storage` (unsafe-list item 5).
+ *
  * A line containing `unsafe` is clean. On a hit, @p out_line is the
  * 1-based line and @p out_item is 1–5. Both stay 0 when the text is clean.
  *
