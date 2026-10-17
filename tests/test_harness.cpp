@@ -1119,6 +1119,16 @@ TEST_F(Site, Scanner) {
       gdeftest_response_has_internal_id("&#42;", 5, err, strlen(err)));
   EXPECT_EQ(1,
       gdeftest_response_has_internal_id("id 42.", 6, NULL, 0));
+  /* A random public id may hold a digit between two hyphens. That is not a
+   * row number; the same digit in a short or single-case token still is. */
+  {
+    const char * id = "/r/AZ6NwVGzV-7-Wrb4eb8TS";
+    const char * slug = "/r/azzzzzzzzzzzzzzzzzzzzz-7-wrbeb";
+    const char * row = "row-7-x";
+    EXPECT_EQ(0, gdeftest_response_has_internal_id(id, strlen(id), NULL, 0));
+    EXPECT_EQ(1, gdeftest_response_has_internal_id(slug, strlen(slug), NULL, 0));
+    EXPECT_EQ(1, gdeftest_response_has_internal_id(row, strlen(row), NULL, 0));
+  }
 }
 
 TEST(Harness, Lint) {

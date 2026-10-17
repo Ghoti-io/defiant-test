@@ -92,6 +92,36 @@ GDEFTEST_Result gdeftest_lint(const char * text, size_t text_len, int * out_line
   return GDEFTEST_OK;
 }
 
+static int token_char(char c) {
+  return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+         (c >= 'a' && c <= 'z') || c == '_' || c == '-';
+}
+
+/* A public id or a random nonce: 20 or more characters of one unbroken token,
+ * mixing upper and lower case. Its digits are random characters, not a row
+ * number, and a hyphen inside it can make one of them look bare. A slug is all
+ * lower case and a stored key is all upper case, so neither is exempt. */
+static int random_token_at(const char * text, size_t n, size_t at) {
+  size_t a = at;
+  size_t b = at;
+  int upper = 0;
+  int lower = 0;
+  while (a > 0 && token_char(text[a - 1])) {
+    a -= 1;
+  }
+  while (b < n && token_char(text[b])) {
+    b += 1;
+  }
+  if (b - a < 20) {
+    return 0;
+  }
+  for (; a < b; a++) {
+    upper |= text[a] >= 'A' && text[a] <= 'Z';
+    lower |= text[a] >= 'a' && text[a] <= 'z';
+  }
+  return upper && lower;
+}
+
 static int span_has_id(const char * text, size_t n) {
   size_t i = 0;
   if (text == NULL || n == 0) {
@@ -124,7 +154,7 @@ static int span_has_id(const char * text, size_t n) {
                    !((text[i] >= '0' && text[i] <= '9') ||
                        (text[i] >= 'A' && text[i] <= 'Z') ||
                        (text[i] >= 'a' && text[i] <= 'z') || text[i] == '_');
-      if (left_bare && right_bare) {
+      if (left_bare && right_bare && !random_token_at(text, n, start)) {
         return 1;
       }
       continue;
