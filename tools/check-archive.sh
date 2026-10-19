@@ -5,7 +5,7 @@
 # The hostile-archive gate, with a plant for each hostile archive.
 #
 # The tests (Site.Traversal, Bomb, NamedTenant, InternalId, Installation,
-# Mistype, Grant) hand gdefcore_subject_import a zip that is hostile in one
+# Mistype, Grant) hand gdefcore_subject_restore a zip that is hostile in one
 # way each and require it refused with nothing stored. A test that has never
 # been seen to fail proves nothing, so this script copies the two libraries
 # that judge an archive, removes one refusal by an exact text edit,

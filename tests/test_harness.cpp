@@ -303,7 +303,8 @@ class Site : public ::testing::Test {
  protected:
   GDEFSTOR_Store * registry_;
   GDEFSTOR_Store * site_;
-  GDEFSTOR_Store * side_;
+  GDEFSTOR_Store * side_;  // the blind store
+  GDEFSTOR_KeyStore * keys_;
   GDEFCORE_Inst * inst_;
   GDEFCORE_Catalog * catalog_;
   GDEFCORE_Subjects * subjects_;
@@ -317,6 +318,7 @@ class Site : public ::testing::Test {
     registry_ = NULL;
     site_ = NULL;
     side_ = NULL;
+    keys_ = NULL;
     inst_ = NULL;
     catalog_ = NULL;
     subjects_ = NULL;
@@ -327,6 +329,14 @@ class Site : public ::testing::Test {
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &registry_));
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &site_));
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &side_));
+    ASSERT_EQ(GDEFSMEMORY_OK, OpenKeys(&keys_));
+  }
+
+  /* A key store of its own (AD-19), with the cipher core gives one. */
+  static GDEFSMEMORY_Result OpenKeys(GDEFSTOR_KeyStore ** out) {
+    static GDEFSTOR_KeyCipher cipher;
+    gdefcore_subject_cipher(&cipher);
+    return gdefsmemory_keystore_create(NULL, &cipher, out);
   }
 
   void TearDown() override {
@@ -334,6 +344,7 @@ class Site : public ::testing::Test {
     gdefcore_subject_destroy(subjects_);
     gdefcore_catalog_destroy(catalog_);
     gdefcore_inst_destroy(inst_);
+    gdefstor_keystore_destroy(keys_);
     gdefstor_store_destroy(side_);
     gdefstor_store_destroy(site_);
     gdefstor_store_destroy(registry_);
@@ -341,7 +352,7 @@ class Site : public ::testing::Test {
 
   void Open() {
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_inst_open_side(registry_, site_, side_, root_, sizeof root_, "",
+        gdefcore_inst_open_keys(registry_, site_, keys_, root_, sizeof root_, "",
             0, NULL, &inst_));
     ASSERT_EQ(GDEFCORE_OK, gdefcore_inst_default(inst_, tenant_));
     ASSERT_EQ(GDEFCORE_OK,
@@ -349,7 +360,7 @@ class Site : public ::testing::Test {
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_inst_catalog_open(inst_, tenant_, strlen(tenant_), &catalog_));
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_subject_open(side_, storage_, sizeof storage_, root_,
+        gdefcore_subject_open(keys_, side_, storage_, sizeof storage_, root_,
             sizeof root_,
             gdefcore_inst_tenant_keyring(inst_, tenant_, strlen(tenant_)), NULL,
             &subjects_));
@@ -433,9 +444,26 @@ class Site : public ::testing::Test {
             entity, strlen(entity), "name", 4, "en", 2, kPlain, strlen(kPlain)));
   }
 
+  /* The data set of a backup pair. */
   void Snapshot(uint8_t ** out, size_t * out_len) {
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_subject_snapshot(subjects_, site_, out, out_len));
+  }
+
+  /* The key set it pairs with, taken after it. */
+  std::string Keyset() {
+    uint8_t * set = NULL;
+    size_t n = 0;
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_subject_keyset(subjects_, &set, &n));
+    std::string out(reinterpret_cast<const char *>(set), set == NULL ? 0 : n);
+    gdefstor_bytes_free(NULL, set);
+    return out;
+  }
+
+  GDEFCORE_Result Restore(GDEFSTOR_Store * into, const uint8_t * zip,
+      size_t zip_len, const std::string & keys) {
+    return gdefcore_subject_restore(subjects_, into, zip, zip_len,
+        reinterpret_cast<const uint8_t *>(keys.data()), keys.size());
   }
 
   bool ReadIs(GDEFCORE_Catalog * catalog, const char * subject,
@@ -450,28 +478,26 @@ class Site : public ::testing::Test {
     return ok;
   }
 
-  void PlantLedger(const uint8_t * zip, size_t zip_len) {
-    uint8_t * ledger = NULL;
-    size_t ledger_len = 0;
-    GDEFSTOR_Write * write = NULL;
-    GDEFSTOR_Column column;
+  /* The planted restore: the ledger read from the backup only. The pair goes
+   * into a key store of its own, and the live ledger, which holds the newer
+   * erasure, is never consulted. */
+  void PlantBackupOnly(GDEFSTOR_Store * into, const uint8_t * zip,
+      size_t zip_len, const std::string & keys) {
+    GDEFSTOR_KeyStore * fresh = NULL;
+    ASSERT_EQ(GDEFSMEMORY_OK, OpenKeys(&fresh));
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_keystore_import(fresh,
+        (const char *)storage_, sizeof storage_,
+        reinterpret_cast<const uint8_t *>(keys.data()), keys.size()));
+    gdefcore_subject_destroy(subjects_);
+    subjects_ = NULL;
+    gdefstor_keystore_destroy(keys_);
+    keys_ = fresh;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_subject_open(keys_, side_, storage_, sizeof storage_, root_,
+            sizeof root_, NULL, NULL, &subjects_));
     ASSERT_EQ(GDEFSTOR_OK,
-        gdefstor_snapshot_ledger(site_, zip, zip_len, NULL, &ledger,
-            &ledger_len));
-    ASSERT_EQ(GDEFSTOR_OK,
-        gdefstor_write_begin(side_, (const char *)storage_, sizeof storage_,
-            NULL, &write));
-    memset(&column, 0, sizeof column);
-    column.name = "text";
-    column.name_len = 4;
-    column.value = ledger_len == 0 ? (const uint8_t *)"" : ledger;
-    column.value_len = ledger_len;
-    ASSERT_EQ(GDEFSTOR_OK,
-        gdefstor_projection_put(write, GDEFCORE_SUBJECT_LEDGER_TYPE,
-            strlen(GDEFCORE_SUBJECT_LEDGER_TYPE), GDEFCORE_SUBJECT_LEDGER_ID,
-            strlen(GDEFCORE_SUBJECT_LEDGER_ID), &column, 1));
-    ASSERT_EQ(GDEFSTOR_OK, gdefstor_write_commit(write));
-    gdefstor_bytes_free(NULL, ledger);
+        gdefstor_snapshot_import(into, (const char *)storage_, sizeof storage_,
+            zip, zip_len, NULL));
   }
 
   void Refuse(const char * name, const void * body, size_t body_len, int deflate,
@@ -488,8 +514,7 @@ class Site : public ::testing::Test {
     part.body_len = body_len;
     ASSERT_TRUE(MakeZip(&part, 1, deflate, &zip, &zip_len));
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &empty));
-    EXPECT_EQ(expect,
-        gdefcore_subject_import(subjects_, empty, zip, zip_len));
+    EXPECT_EQ(expect, Restore(empty, zip, zip_len, Keyset()));
     exported = gdefstor_snapshot_export(empty, (const char *)storage_,
         sizeof storage_, NULL, &again, &again_len);
     ASSERT_EQ(GDEFSTOR_OK, exported);
@@ -615,6 +640,7 @@ TEST_F(Site, RoundTrip) {
           gdefcore_inst_tenant_keyring(inst_, tenant_, strlen(tenant_)), wrap,
           sizeof wrap));
   Snapshot(&zip, &zip_len);
+  std::string keys = Keyset();
   EXPECT_TRUE(HasBytes(zip, zip_len, kTitle, strlen(kTitle)));
   EXPECT_TRUE(HasBytes(zip, zip_len, "s1:", 3));
   EXPECT_FALSE(HasBytes(zip, zip_len, kPlain, strlen(kPlain)));
@@ -626,7 +652,7 @@ TEST_F(Site, RoundTrip) {
   if (strcmp(Plant(), "lose") == 0 && zip_len > 0) {
     use = zip_len - 1;
   }
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_import(subjects_, sql, zip, use));
+  ASSERT_EQ(GDEFCORE_OK, Restore(sql, zip, use, keys));
   EXPECT_TRUE(StoresEqual(site_, sql, storage_, sizeof storage_));
   gdefstor_store_destroy(sql);
   gdefstor_bytes_free(NULL, zip);
@@ -738,18 +764,15 @@ TEST_F(Site, Restore) {
       gdefcore_entity_create(catalog_, "site.person", 11, entity, NULL));
   SavePersonal(subject, entity);
   Snapshot(&zip, &zip_len);
+  std::string keys = Keyset();
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_subject_erase(subjects_, subject, strlen(subject), subject,
           strlen(subject)));
   ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &empty));
   if (strcmp(Plant(), "ledger") == 0) {
-    ASSERT_EQ(GDEFSTOR_OK,
-        gdefstor_snapshot_import(empty, (const char *)storage_, sizeof storage_,
-            zip, zip_len, NULL));
-    PlantLedger(zip, zip_len);
+    PlantBackupOnly(empty, zip, zip_len, keys);
   } else {
-    ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_subject_import(subjects_, empty, zip, zip_len));
+    ASSERT_EQ(GDEFCORE_OK, Restore(empty, zip, zip_len, keys));
   }
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_catalog_open(empty, storage_, sizeof storage_, NULL, NULL,
@@ -792,7 +815,7 @@ TEST_F(Site, OwnGrants) {
           9));
   Snapshot(&zip, &zip_len);
   ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &empty));
-  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_import(subjects_, empty, zip, zip_len));
+  ASSERT_EQ(GDEFCORE_OK, Restore(empty, zip, zip_len, Keyset()));
   ASSERT_EQ(GDEFCORE_OK,
       gdefcore_catalog_open(empty, storage_, sizeof storage_, NULL, NULL,
           &restored));

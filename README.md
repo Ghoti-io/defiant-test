@@ -1,8 +1,9 @@
 # defiant-test
 
-The milestone harness for Defiant. It exports a tenant through
-`gdefcore_subject_snapshot`, imports that archive through
-`gdefcore_subject_import`, and runs the six gates that close milestone 1:
+The milestone harness for Defiant. It takes a tenant's backup pair through
+`gdefcore_subject_snapshot` (the data set) and `gdefcore_subject_keyset` (the
+key set, from the tenant's key store), restores it through
+`gdefcore_subject_restore`, and runs the six gates that close milestone 1:
 cross-tenant isolation, an access-filter bypass, erasure that survives
 restore, a memory-to-SQLite round trip, the unsafe-list lint for items 1–5,
 and a scanner for an internal id in a rendered page.
