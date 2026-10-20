@@ -302,8 +302,7 @@ void OneValue(GDEFCORE_Value * value, const char * field, const char * text,
 class Site : public ::testing::Test {
  protected:
   GDEFSTOR_Store * registry_;
-  GDEFSTOR_Store * site_;
-  GDEFSTOR_Store * side_;  // the blind store
+  GDEFSTOR_Store * site_;  // the tenant's data store, its blind table too
   GDEFSTOR_KeyStore * keys_;
   GDEFCORE_Inst * inst_;
   GDEFCORE_Catalog * catalog_;
@@ -317,7 +316,6 @@ class Site : public ::testing::Test {
   void SetUp() override {
     registry_ = NULL;
     site_ = NULL;
-    side_ = NULL;
     keys_ = NULL;
     inst_ = NULL;
     catalog_ = NULL;
@@ -328,7 +326,6 @@ class Site : public ::testing::Test {
     memset(tenant_, 0, sizeof tenant_);
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &registry_));
     ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &site_));
-    ASSERT_EQ(GDEFSMEMORY_OK, gdefsmemory_store_create(NULL, NULL, &side_));
     ASSERT_EQ(GDEFSMEMORY_OK, OpenKeys(&keys_));
   }
 
@@ -345,7 +342,6 @@ class Site : public ::testing::Test {
     gdefcore_catalog_destroy(catalog_);
     gdefcore_inst_destroy(inst_);
     gdefstor_keystore_destroy(keys_);
-    gdefstor_store_destroy(side_);
     gdefstor_store_destroy(site_);
     gdefstor_store_destroy(registry_);
   }
@@ -360,10 +356,13 @@ class Site : public ::testing::Test {
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_inst_catalog_open(inst_, tenant_, strlen(tenant_), &catalog_));
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_subject_open(keys_, side_, storage_, sizeof storage_, root_,
+        gdefcore_subject_open(keys_, site_, storage_, sizeof storage_, root_,
             sizeof root_,
             gdefcore_inst_tenant_keyring(inst_, tenant_, strlen(tenant_)), NULL,
             &subjects_));
+    /* The keys that give a personal value its blind-index row when a draft
+     * of it is published (story S6c). */
+    gdefcore_catalog_bind_subjects(catalog_, subjects_);
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_request_create(storage_, sizeof storage_, 0, 0, NULL,
             &request_));
@@ -493,8 +492,9 @@ class Site : public ::testing::Test {
     gdefstor_keystore_destroy(keys_);
     keys_ = fresh;
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_subject_open(keys_, side_, storage_, sizeof storage_, root_,
+        gdefcore_subject_open(keys_, site_, storage_, sizeof storage_, root_,
             sizeof root_, NULL, NULL, &subjects_));
+    gdefcore_catalog_bind_subjects(catalog_, subjects_);
     ASSERT_EQ(GDEFSTOR_OK,
         gdefstor_snapshot_import(into, (const char *)storage_, sizeof storage_,
             zip, zip_len, NULL));
@@ -642,7 +642,8 @@ TEST_F(Site, RoundTrip) {
   Snapshot(&zip, &zip_len);
   std::string keys = Keyset();
   EXPECT_TRUE(HasBytes(zip, zip_len, kTitle, strlen(kTitle)));
-  EXPECT_TRUE(HasBytes(zip, zip_len, "s1:", 3));
+  /* A personal value is "@c": the hex of its sealed text (story S6c). */
+  EXPECT_TRUE(HasBytes(zip, zip_len, "73313a", 6));
   EXPECT_FALSE(HasBytes(zip, zip_len, kPlain, strlen(kPlain)));
   EXPECT_FALSE(HasBytes(zip, zip_len, raw, sizeof raw));
   EXPECT_FALSE(HasBytes(zip, zip_len, wrap, sizeof wrap));
@@ -727,7 +728,7 @@ TEST_F(Site, Readable) {
   ASSERT_EQ(pid, waitpid(pid, NULL, 0));
   unlink(path);
   EXPECT_NE(std::string::npos, dumped.find(kTitle));
-  EXPECT_NE(std::string::npos, dumped.find("s1:"));
+  EXPECT_NE(std::string::npos, dumped.find("73313a"));
   EXPECT_EQ(std::string::npos, dumped.find(kPlain));
   EXPECT_EQ(std::string::npos,
       dumped.find(std::string((const char *)raw, sizeof raw)));
