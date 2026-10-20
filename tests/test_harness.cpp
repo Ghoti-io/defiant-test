@@ -31,7 +31,7 @@
 #include <ghoti.io/archive/writer.h>
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
-#include <ghoti.io/defiant-storage-sqlite/sqlite.h>
+#include <ghoti.io/defiant-storage-sqlite/model.h>
 #include <ghoti.io/defiant-storage/projection.h>
 #include <ghoti.io/defiant-storage/snapshot.h>
 #include <ghoti.io/defiant-storage/store.h>
@@ -647,7 +647,9 @@ TEST_F(Site, RoundTrip) {
   EXPECT_FALSE(HasBytes(zip, zip_len, raw, sizeof raw));
   EXPECT_FALSE(HasBytes(zip, zip_len, wrap, sizeof wrap));
   ASSERT_NE(mkdtemp(dir), nullptr);
-  ASSERT_EQ(GDEFSSQLITE_OK, gdefssqlite_store_create(dir, NULL, NULL, &sql));
+  /* The SQLite store of the entity port (story S6b): the site's data is the
+   * port's, so a restore needs a store that serves it. */
+  ASSERT_EQ(GDEFSSQLITE_OK, gdefssqlite_model_store_create(dir, NULL, NULL, NULL, &sql));
   use = zip_len;
   if (strcmp(Plant(), "lose") == 0 && zip_len > 0) {
     use = zip_len - 1;
