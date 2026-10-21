@@ -81,6 +81,9 @@ static char * mkdtemp(char * tmpl) {
 
 namespace {
 
+/* When a restore's forward migrations are dated (core story S11). */
+constexpr int64_t kRestoreMs = 1700000000000;
+
 const char kPlain[] = "platypus-secret";
 const char kTitle[] = "Hello";
 const char kCanary[] = "CANARY-HOSTILE";
@@ -489,7 +492,7 @@ class Site : public ::testing::Test {
   GDEFCORE_Result Restore(GDEFSTOR_Store * into, const uint8_t * zip,
       size_t zip_len, const std::string & keys) {
     return gdefcore_subject_restore(subjects_, NULL, into, zip, zip_len,
-        reinterpret_cast<const uint8_t *>(keys.data()), keys.size(), NULL);
+        reinterpret_cast<const uint8_t *>(keys.data()), keys.size(), kRestoreMs, NULL);
   }
 
   bool ReadIs(GDEFCORE_Catalog * catalog, const char * subject,
@@ -684,7 +687,7 @@ TEST_F(Site, RoundTrip) {
   }
   GDEFCORE_Restore * report = NULL;
   ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_restore(subjects_, NULL, sql, zip, use,
-      reinterpret_cast<const uint8_t *>(keys.data()), keys.size(), &report));
+      reinterpret_cast<const uint8_t *>(keys.data()), keys.size(), kRestoreMs, &report));
   /* The starter kit grants to a state, which the restore holds back for its
    * typed confirmation (core story S8): the state roles' members are the
    * restore's, and the rest is the same truth. Applied with the confirmation
