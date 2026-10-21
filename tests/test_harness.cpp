@@ -32,7 +32,6 @@
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
 #include <ghoti.io/defiant-storage-sqlite/model.h>
-#include <ghoti.io/defiant-storage/projection.h>
 #include <ghoti.io/defiant-storage/snapshot.h>
 #include <ghoti.io/defiant-storage/store.h>
 #include <ghoti.io/defiant-test/defiant-test.h>
@@ -877,24 +876,29 @@ TEST_F(Site, Bomb) {
   Open();
   zeros = (uint8_t *)calloc(65536, 1);
   ASSERT_NE(zeros, nullptr);
-  Refuse("b:aa", zeros, 65536, 1, GDEFCORE_ERR_LIMIT);
+  Refuse("model/zeros.json", zeros, 65536, 1, GDEFCORE_ERR_LIMIT);
   free(zeros);
 }
 
+/* Each hostile member below has the shape of a member of a snapshot's entity
+ * part (defiant-storage's formats.md): a type's entities, or one entity's
+ * revisions, `"format":"defiant-revision/1"`. */
 TEST_F(Site, NamedTenant) {
   const char body[] =
-      "{\"tenant\":\"bee\",\"body\":\"CANARY-HOSTILE\"}";
+      "{\"type\":\"core.post\",\"tenant\":\"bee\",\"entities\":[],"
+      "\"body\":\"CANARY-HOSTILE\"}";
   Open();
-  Refuse("r:1.1", body, strlen(body), 0, GDEFCORE_ERR_INVALID);
+  Refuse("model/636f72652e706f7374/entities.json", body, strlen(body), 0,
+      GDEFCORE_ERR_INVALID);
 }
 
 TEST_F(Site, InternalId) {
   const char body[] =
-      "{\"format\":\"defiant-revision/1\",\"seq\":1,\"row\":1,"
-      "\"entity\":\"7\",\"type\":\"core.post\",\"lang\":{},"
-      "\"body\":\"CANARY-HOSTILE\"}";
+      "{\"format\":\"defiant-revision/1\",\"type\":\"core.post\",\"id\":\"7\","
+      "\"revisions\":[],\"items\":[],\"body\":\"CANARY-HOSTILE\"}";
   Open();
-  Refuse("r:1.1", body, strlen(body), 0, GDEFCORE_ERR_INVALID);
+  Refuse("model/636f72652e706f7374/37.json", body, strlen(body), 0,
+      GDEFCORE_ERR_INVALID);
 }
 
 TEST_F(Site, Installation) {
@@ -904,45 +908,24 @@ TEST_F(Site, Installation) {
   Open();
   ASSERT_EQ(GDEFCORE_OK, gdefcore_id_generate(id));
   n = snprintf(body, sizeof body,
-      "{\"format\":\"defiant-revision/1\",\"seq\":1,\"row\":1,"
-      "\"entity\":\"%s\",\"type\":\"core.tenant\",\"lang\":{},"
+      "{\"format\":\"defiant-revision/1\",\"type\":\"core.tenant\","
+      "\"id\":\"%s\",\"revisions\":[],\"items\":[],"
       "\"body\":\"CANARY-HOSTILE\"}",
       id);
   ASSERT_GT(n, 0);
   ASSERT_LT((size_t)n, sizeof body);
-  Refuse("r:1.1", body, (size_t)n, 0, GDEFCORE_ERR_INVALID);
+  Refuse("model/636f72652e74656e616e74/1.json", body, (size_t)n, 0,
+      GDEFCORE_ERR_INVALID);
 }
 
 TEST_F(Site, Mistype) {
   const char body[] =
-      "{\"format\":\"defiant-revision/1\",\"seq\":1,\"row\":1,"
-      "\"entity\":\"not-a-public-id\",\"type\":\"core.post\",\"lang\":{},"
+      "{\"format\":\"defiant-revision/1\",\"type\":\"core.post\","
+      "\"id\":\"not-a-public-id\",\"revisions\":[],\"items\":[],"
       "\"body\":\"CANARY-HOSTILE\"}";
   Open();
-  Refuse("r:1.1", body, strlen(body), 0, GDEFCORE_ERR_INVALID);
-}
-
-TEST_F(Site, Grant) {
-  const char body[] =
-      "{\"role\":\"anonymous\",\"label\":\"Read posts\","
-      "\"body\":\"CANARY-HOSTILE\"}";
-  const char anon[] =
-      "{\"role\":\"anonymous\",\"label\":\"Read posts\","
-      "\"confirmation\":\"not-the-confirmation\","
-      "\"body\":\"CANARY-HOSTILE\"}";
-  const char auth[] =
-      "{\"role\":\"authenticated\",\"label\":\"Read posts\","
-      "\"confirmation\":\"not-the-confirmation\","
-      "\"body\":\"CANARY-HOSTILE\"}";
-  const char other[] =
-      "{\"role\":\"editors\",\"label\":\"Read posts\","
-      "\"confirmation\":\"not-the-confirmation\","
-      "\"body\":\"CANARY-HOSTILE\"}";
-  Open();
-  Refuse("r:1.1", body, strlen(body), 0, GDEFCORE_ERR_INVALID);
-  Refuse("r:1.1", anon, strlen(anon), 0, GDEFCORE_ERR_INVALID);
-  Refuse("r:1.1", auth, strlen(auth), 0, GDEFCORE_ERR_INVALID);
-  Refuse("r:1.1", other, strlen(other), 0, GDEFCORE_ERR_INVALID);
+  Refuse("model/636f72652e706f7374/6e.json", body, strlen(body), 0,
+      GDEFCORE_ERR_INVALID);
 }
 
 TEST_F(Site, CrossTenant) {

@@ -5,7 +5,7 @@
 # The hostile-archive gate, with a plant for each hostile archive.
 #
 # The tests (Site.Traversal, Bomb, NamedTenant, InternalId, Installation,
-# Mistype, Grant) hand gdefcore_subject_restore a zip that is hostile in one
+# Mistype) hand gdefcore_subject_restore a zip that is hostile in one
 # way each and require it refused with nothing stored. A test that has never
 # been seen to fail proves nothing, so this script copies the two libraries
 # that judge an archive, removes one refusal by an exact text edit,
@@ -52,7 +52,7 @@ rm -rf "$SCRATCH"
 mkdir -p "$SCRATCH"
 trap 'rm -rf "$SCRATCH"' EXIT
 
-ALL='Site.Traversal:Site.Bomb:Site.NamedTenant:Site.InternalId:Site.Installation:Site.Mistype:Site.Grant'
+ALL='Site.Traversal:Site.Bomb:Site.NamedTenant:Site.InternalId:Site.Installation:Site.Mistype'
 
 if ! "$BIN" --gtest_filter="$ALL" --gtest_brief=1 > "$SCRATCH/real.log" 2>&1; then
   printf 'check-archive: the hostile-archive tests fail on the real tree\n' >&2
@@ -61,11 +61,11 @@ if ! "$BIN" --gtest_filter="$ALL" --gtest_brief=1 > "$SCRATCH/real.log" 2>&1; th
 fi
 # A filter that matches nothing also exits 0. Count what ran.
 ran=$("$BIN" --gtest_filter="$ALL" --gtest_list_tests | grep -c '^  ')
-if [ "$ran" -ne 7 ]; then
-  printf 'check-archive: expected 7 hostile-archive tests, found %s\n' "$ran" >&2
+if [ "$ran" -ne 6 ]; then
+  printf 'check-archive: expected 6 hostile-archive tests, found %s\n' "$ran" >&2
   exit 1
 fi
-printf 'check-archive: the 7 hostile-archive tests pass on the real tree\n'
+printf 'check-archive: the 6 hostile-archive tests pass on the real tree\n'
 
 fail=0
 
@@ -187,46 +187,35 @@ plant bomb Site.Bomb "$RATIO" 'return 0;' "$RATIO" 'return 0;'
 
 # A document that names a tenant is accepted.
 plant named-tenant Site.NamedTenant \
-  '  if (tenant != NULL) {
+  '  if (gtext_json_object_get(root, "tenant", 6) != NULL) {
     return GDEFCORE_ERR_INVALID;
   }' \
-  '  if (tenant != NULL && 0) {
+  '  if (gtext_json_object_get(root, "tenant", 6) != NULL && 0) {
     return GDEFCORE_ERR_INVALID;
   }' '' ''
 
 # An internal (decimal) id is accepted: the digits check and the canonical
 # public-id check both go, because the second also refuses "7".
 plant internal-id Site.InternalId \
-  '    if (digits_only(entity_text, entity_len)) {
-      return GDEFCORE_ERR_INVALID;
-    }
-    if (gdefcore_id_canonical(entity_text, entity_len, canon) !=
-        GDEFCORE_OK) {
-      return GDEFCORE_ERR_INVALID;
-    }' \
-  '    (void)canon;' '' ''
+  '  if (digits_only(entity_text, entity_len)) {
+    return GDEFCORE_ERR_INVALID;
+  }
+  if (gdefcore_id_canonical(entity_text, entity_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }' \
+  '  (void)canon;' '' ''
 
 # A mistyped public id is accepted.
 plant mistype Site.Mistype \
-  '    if (gdefcore_id_canonical(entity_text, entity_len, canon) !=
-        GDEFCORE_OK) {
-      return GDEFCORE_ERR_INVALID;
-    }' \
-  '    (void)canon;' '' ''
+  '  if (gdefcore_id_canonical(entity_text, entity_len, canon) != GDEFCORE_OK) {
+    return GDEFCORE_ERR_INVALID;
+  }' \
+  '  (void)canon;' '' ''
 
 # An installation-scope type is accepted.
 plant installation Site.Installation \
   'span_is(type_text, type_len, "core.tenant")' \
   'span_is(type_text, type_len, "core.tenan_")' '' ''
-
-# A role grant without its confirmation is accepted.
-plant grant Site.Grant \
-  '  if (gtext_json_get_string(confirm, &confirm_text, &confirm_len) !=
-          GTEXT_JSON_OK ||
-      !grant_confirm_ok(role_text, role_len, confirm_text, confirm_len)) {
-    return GDEFCORE_ERR_INVALID;
-  }' \
-  '  (void)confirm; (void)confirm_text; (void)confirm_len;' '' ''
 
 if [ "$fail" -ne 0 ]; then
   exit 1

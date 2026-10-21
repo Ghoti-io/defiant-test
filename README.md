@@ -57,4 +57,9 @@ not add a signature.
 
 ## Status
 
-Milestone 1. The format token is `defiant-snapshot/1`.
+Milestone 1. The data sets it carries are `defiant-snapshot/1`, the
+entity-truth snapshot of `defiant-storage` (its `documentation/formats.md`),
+whose per-entity members say `defiant-revision/1`. The hostile archives of
+`tools/check-archive.sh` are members of that shape: a type's entities that
+name a tenant, and one entity's revisions under an internal id, a mistyped
+public id or the installation's `core.tenant` type.
