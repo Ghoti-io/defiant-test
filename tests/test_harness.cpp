@@ -1175,12 +1175,12 @@ TEST_F(Site, Bypass) {
   gdefcore_text_free(catalog_, page);
   gdefcore_text_free(catalog_, other);
   EXPECT_EQ(gdefcore_access_read(catalog_, request_, post, strlen(post), "en", 2,
-                "title", 5, &texts, &lens, &count),
+                "title", 5, &texts, &lens, &count, NULL),
       gdefcore_access_read(catalog_, request_, missing, strlen(missing), "en", 2,
-          "title", 5, &texts, &lens, &count));
+          "title", 5, &texts, &lens, &count, NULL));
   EXPECT_EQ(GDEFCORE_ERR_INVALID,
       gdefcore_access_read(catalog_, request_, post, strlen(post), "en", 2,
-          "title", 5, &texts, &lens, &count));
+          "title", 5, &texts, &lens, &count, NULL));
   gdefcore_routes_destroy(routes);
 }
 
