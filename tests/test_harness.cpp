@@ -29,6 +29,7 @@
 #include <ghoti.io/archive/sink.h>
 #include <ghoti.io/archive/stream.h>
 #include <ghoti.io/archive/writer.h>
+#include <ghoti.io/cutil/fiber.h>
 #include <ghoti.io/defiant-core/defiant-core.h>
 #include <ghoti.io/defiant-storage-memory/memory.h>
 #include <ghoti.io/defiant-storage-sqlite/model.h>
@@ -1006,6 +1007,13 @@ TEST_F(Site, Mistype) {
 }
 
 TEST_F(Site, CrossTenant) {
+#if !GCU_FIBER_SUPPORTED
+  /* The two requests run on core's scheduler, which spawns each on a cutil
+   * fiber; where cutil has none (every target but x86-64 and arm64 ELF, and
+   * Windows) a spawn is refused, and suite/tools/xarch (story S10) saw the
+   * failed test leave its scheduler running and the program never exit. */
+  GTEST_SKIP() << "cutil has no fibers on this target, so core's scheduler spawns nothing";
+#endif
   char id_b[GDEFCORE_PUBLIC_ID_LEN + 1];
   char post[GDEFCORE_PUBLIC_ID_LEN + 1];
   uint8_t key_b[16];
