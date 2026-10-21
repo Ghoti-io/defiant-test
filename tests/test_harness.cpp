@@ -423,17 +423,26 @@ class Site : public ::testing::Test {
     ASSERT_EQ(GDEFCORE_OK, gdefcore_form_publish(catalog_, id, strlen(id)));
   }
 
+  /* A person's `name` is personal, and names its subject: the `person`
+   * reference beside it, which the first gdefcore_subject_save() sets (core
+   * story S7: every personal field names its subject source). */
   void DefinePerson() {
-    GDEFCORE_Field field;
-    memset(&field, 0, sizeof field);
-    field.size = sizeof field;
-    field.name = "name";
-    field.name_len = 4;
-    field.required = 1;
-    field.personal = 1;
+    GDEFCORE_Field fields[2];
+    memset(fields, 0, sizeof fields);
+    fields[0].size = sizeof fields[0];
+    fields[0].name = "name";
+    fields[0].name_len = 4;
+    fields[0].required = 1;
+    fields[0].personal = 1;
+    fields[0].subject = "person";
+    fields[0].subject_len = 6;
+    fields[1].size = sizeof fields[1];
+    fields[1].name = "person";
+    fields[1].name_len = 6;
+    fields[1].type = GDEFSTOR_FIELD_REFERENCE;
     ASSERT_EQ(GDEFCORE_OK,
         gdefcore_type_define(catalog_, "site.person", 11, GDEFCORE_TYPE_CONTENT,
-            &field, 1));
+            fields, 2));
   }
 
   void SavePersonal(const char * subject, const char * entity) {
