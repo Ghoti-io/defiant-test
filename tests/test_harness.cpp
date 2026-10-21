@@ -251,8 +251,22 @@ std::set<std::string> ManifestKeys(const std::string & manifest) {
   return keys;
 }
 
+/* Lowercase hex, as a snapshot spells member names. */
+std::string HexName(const std::string & s) {
+  static const char kHex[] = "0123456789abcdef";
+  std::string out;
+  for (unsigned char c : s) {
+    out += kHex[c >> 4];
+    out += kHex[c & 0x0f];
+  }
+  return out;
+}
+
+/* Whether two stores hold the same truth for @p tenant, member by member,
+ * leaving out the members named in @p skip. */
 bool StoresEqual(GDEFSTOR_Store * left, GDEFSTOR_Store * right,
-    const uint8_t * tenant, size_t tenant_len) {
+    const uint8_t * tenant, size_t tenant_len,
+    const std::set<std::string> & skip = std::set<std::string>()) {
   uint8_t * a = NULL;
   uint8_t * b = NULL;
   size_t a_len = 0;
@@ -279,6 +293,10 @@ bool StoresEqual(GDEFSTOR_Store * left, GDEFSTOR_Store * right,
   man_b = mb["manifest"];
   ma.erase("manifest");
   mb.erase("manifest");
+  for (const std::string & name : skip) {
+    ma.erase(name);
+    mb.erase(name);
+  }
   same = ma == mb && ManifestKeys(man_a) == ManifestKeys(man_b);
   gdefstor_bytes_free(NULL, a);
   gdefstor_bytes_free(NULL, b);
@@ -454,7 +472,7 @@ class Site : public ::testing::Test {
   /* The data set of a backup pair. */
   void Snapshot(uint8_t ** out, size_t * out_len) {
     ASSERT_EQ(GDEFCORE_OK,
-        gdefcore_subject_snapshot(subjects_, site_, out, out_len));
+        gdefcore_subject_snapshot(subjects_, site_, NULL, 0, out, out_len));
   }
 
   /* The key set it pairs with, taken after it. */
@@ -469,8 +487,8 @@ class Site : public ::testing::Test {
 
   GDEFCORE_Result Restore(GDEFSTOR_Store * into, const uint8_t * zip,
       size_t zip_len, const std::string & keys) {
-    return gdefcore_subject_restore(subjects_, into, zip, zip_len,
-        reinterpret_cast<const uint8_t *>(keys.data()), keys.size());
+    return gdefcore_subject_restore(subjects_, NULL, into, zip, zip_len,
+        reinterpret_cast<const uint8_t *>(keys.data()), keys.size(), NULL);
   }
 
   bool ReadIs(GDEFCORE_Catalog * catalog, const char * subject,
@@ -663,8 +681,58 @@ TEST_F(Site, RoundTrip) {
   if (strcmp(Plant(), "lose") == 0 && zip_len > 0) {
     use = zip_len - 1;
   }
-  ASSERT_EQ(GDEFCORE_OK, Restore(sql, zip, use, keys));
-  EXPECT_TRUE(StoresEqual(site_, sql, storage_, sizeof storage_));
+  GDEFCORE_Restore * report = NULL;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_subject_restore(subjects_, NULL, sql, zip, use,
+      reinterpret_cast<const uint8_t *>(keys.data()), keys.size(), &report));
+  /* The starter kit grants to a state, which the restore holds back for its
+   * typed confirmation (core story S8): the state roles' members are the
+   * restore's, and the rest is the same truth. Applied with the confirmation
+   * the admin edit asks for, the grants are what the source holds. */
+  {
+    GDEFCORE_Catalog * restored = NULL;
+    const std::string role_dir = "model/" + HexName("core.role") + "/";
+    /* The hold and each grant applied again are changesets of their own:
+     * they move the config epoch and the bus's stream, so the counters and
+     * the outbox are the restore's too (storage's conformance round trip
+     * holds those, memory to SQLite). */
+    std::set<std::string> skip = {role_dir + "entities.json",
+        "model/counters.json", "model/outbox.json"};
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_catalog_open(sql, storage_, sizeof storage_,
+        NULL, NULL, &restored));
+    EXPECT_GT(gdefcore_restore_held_count(report), 0u);
+    for (size_t i = 0; i < gdefcore_restore_held_count(report); i++) {
+      GDEFCORE_Restore_Held h;
+      char role_id[GDEFCORE_PUBLIC_ID_LEN + 1];
+      memset(&h, 0, sizeof h);
+      h.size = sizeof h;
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_restore_held(report, i, &h));
+      std::string role(h.role, h.role_len);
+      EXPECT_TRUE(role == "anonymous" || role == "authenticated") << role;
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_access_role_id(restored, h.role,
+          h.role_len, role_id));
+      skip.insert(role_dir + HexName(role_id) + ".json");
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_access_grant(restored, h.role, h.role_len,
+          h.permission, h.permission_len, h.confirmation, h.confirmation_len));
+    }
+    EXPECT_TRUE(StoresEqual(site_, sql, storage_, sizeof storage_, skip));
+    for (const char * role : {"anonymous", "authenticated"}) {
+      char ** a = NULL;
+      char ** b = NULL;
+      size_t na = 0;
+      size_t nb = 0;
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_access_role_grants(catalog_, role,
+          strlen(role), &a, &na));
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_access_role_grants(restored, role,
+          strlen(role), &b, &nb));
+      std::set<std::string> sa(a, a + na);
+      std::set<std::string> sb(b, b + nb);
+      EXPECT_EQ(sa, sb) << role;
+      gdefcore_access_free(catalog_, a, na);
+      gdefcore_access_free(restored, b, nb);
+    }
+    gdefcore_catalog_destroy(restored);
+  }
+  gdefcore_restore_free(report);
   gdefstor_store_destroy(sql);
   gdefstor_bytes_free(NULL, zip);
   std::filesystem::remove_all(dir);
