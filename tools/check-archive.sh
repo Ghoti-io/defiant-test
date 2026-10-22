@@ -24,19 +24,31 @@
 # The plants are edits to scratch copies. Nothing is planted in the
 # libraries, and an edit that does not apply exactly once fails the script.
 #
+# Speed. A copy takes its tree's finished build (without the test programs),
+# with its timestamps, and is built with the flags its tree was: the test data
+# path is handed to it as a make argument, so the copy compiles the objects
+# its edit reaches and relinks, not the library. Plants run at once (up to
+# GHOTI_CHECK_JOBS, default at most four), each in copies of its own, and
+# print in the order they are written. Each shows that its edit was compiled
+# in: an object that depends on the edit and was not compiled is a STALE
+# OBJECT, a failure of its own. The last plant makes the rebuild not happen
+# and has to be refused as one (skipped when there is no build to be stale).
+# The helpers are defiant-storage's plant-lib.sh.
+#
 # Usage: check-archive.sh <test_harness> <defiant-core-src> <defiant-storage-src>
-#        <make> [make args...]
-# Run with LD_LIBRARY_PATH and PKG_CONFIG_PATH as for the test itself.
+#        <make> <build-dir> [make args...]
+# Run with LD_LIBRARY_PATH and PKG_CONFIG_PATH as for the test itself, and
+# GHOTI_PLANT_LIB naming plant-lib.sh.
 
 set -u
 
-BIN="${1:?usage: check-archive.sh <test_harness> <core-src> <storage-src> <make> [args]}"
+BIN="${1:?usage: check-archive.sh <test_harness> <core-src> <storage-src> <make> <build-dir> [args]}"
 case "$BIN" in /*) ;; *) BIN="$(pwd)/$BIN" ;; esac
 CORE="${2:?missing the defiant-core source tree}"
 STOR="${3:?missing the defiant-storage source tree}"
 MAKE_CMD="${4:?missing make}"
-shift 4
-MARGS="-j${GHOTI_CHECK_JOBS:-4} $*"
+BUILD_DIR="${5:?missing the build directory}"
+shift 5
 
 for d in "$CORE" "$STOR"; do
   if [ ! -f "$d/Makefile" ] || [ ! -d "$d/src" ]; then
@@ -44,13 +56,12 @@ for d in "$CORE" "$STOR"; do
     exit 1
   fi
 done
+case "$CORE" in /*) ;; *) CORE="$(cd "$CORE" && pwd)" ;; esac
+case "$STOR" in /*) ;; *) STOR="$(cd "$STOR" && pwd)" ;; esac
 
-unset MAKEFLAGS MFLAGS
-ROOT=$(pwd)
-SCRATCH="$ROOT/build/archive-plants"
-rm -rf "$SCRATCH"
-mkdir -p "$SCRATCH"
-trap 'rm -rf "$SCRATCH"' EXIT
+. "$(dirname "$0")/plant-load.sh"
+plant_setup "$MAKE_CMD" "$BUILD_DIR" "$@"
+SCRATCH=$PLANT_SCRATCH
 
 ALL='Site.Traversal:Site.Bomb:Site.NamedTenant:Site.InternalId:Site.Installation:Site.Mistype'
 
@@ -67,109 +78,154 @@ if [ "$ran" -ne 6 ]; then
 fi
 printf 'check-archive: the 6 hostile-archive tests pass on the real tree\n'
 
-fail=0
-
-copy_tree() {
-  src=$1
-  dest=$2
+# copy_lib <tree> <dest>: the tree as git tracks it, and its finished build
+# without the test objects and the test programs, which a library build never
+# reads. Timestamps are kept, so make recompiles what an edit reaches.
+copy_lib() {
+  src=$1 dest=$2
   mkdir -p "$dest"
   for d in $(ls -A "$src"); do
     case "$d" in build | .git | docs) continue ;; esac
-    cp -a "$src/$d" "$dest/"
+    plant_cp "$src/$d" "$dest/"
+  done
+  [ -z "${GHOTI_CHECK_COLD:-}" ] || return 0
+  b="$src/$BUILD_DIR"
+  [ -d "$b" ] || return 0
+  mkdir -p "$dest/$BUILD_DIR"
+  for e in "$b"/* "$b"/.[!.]*; do
+    [ -e "$e" ] || continue
+    case "${e##*/}" in
+      objects)
+        mkdir -p "$dest/$BUILD_DIR/objects"
+        for o in "$e"/* "$e"/.[!.]*; do
+          [ -e "$o" ] || continue
+          [ "${o##*/}" = tests ] && continue
+          plant_cp "$o" "$dest/$BUILD_DIR/objects/"
+        done
+        ;;
+      apps)
+        mkdir -p "$dest/$BUILD_DIR/apps"
+        for a in "$e"/* "$e"/.[!.]*; do
+          [ -e "$a" ] || continue
+          case "${a##*/}" in test* | readzip) ;; *) plant_cp "$a" "$dest/$BUILD_DIR/apps/" ;; esac
+        done
+        ;;
+      *) plant_cp "$e" "$dest/$BUILD_DIR/" ;;
+    esac
   done
 }
 
-# edit <dir> <file> <old> <new>: replace the one occurrence, or return 3.
-edit() {
-  python3 - "$1/$2" "$3" "$4" <<'PY'
-import sys
-path, old, new = sys.argv[1:4]
-text = open(path).read()
-if text.count(old) != 1:
-    sys.stderr.write("anchor matched %d times in %s\n" % (text.count(old), path))
-    sys.exit(3)
-open(path, "w").write(text.replace(old, new, 1))
-PY
+# edit_and_build <label> <tree> <dest> <stale> <file> <old> <new>: copy the
+# tree, apply the one exact edit, build the libraries. With <stale> = 1 the
+# objects that depend on the edit are made to look up to date first, so the
+# rebuild does not happen. Leaves what the stale-object check found in
+# STALE_OBJS; returns 1 (having said why) if the plant cannot be tested.
+edit_and_build() {
+  label=$1 tree=$2 dest=$3 stale=$4 file=$5 old=$6 new=$7
+  copy_lib "$tree" "$dest"
+  if ! plant_edit p "$dest" "$file" "$old" "$new"; then
+    printf 'check-archive: %s: THE %s EDIT DID NOT APPLY, nothing was tested\n' "$name" "$label" >&2
+    return 1
+  fi
+  if cmp -s "$tree/$file" "$dest/$file"; then
+    printf 'check-archive: %s: the edited %s file equals the original\n' "$name" "$label" >&2
+    return 1
+  fi
+  touch "$dest/$file"
+  if [ "$stale" = 1 ]; then
+    for o in $(plant_depends "$dest" "$file"); do
+      ( cd "$dest" && touch "$o" )
+    done
+  fi
+  # shellcheck disable=SC2086
+  if ! ( cd "$dest" && "$MAKE_CMD" --no-print-directory all $PLANT_PLANT_ARGS \
+      TEST_DATA="$tree/tests/data" ) > "$dest.build.log" 2>&1; then
+    printf 'check-archive: %s: the planted copy did not build\n' "$name" >&2
+    tail -20 "$dest.build.log" >&2
+    return 1
+  fi
+  more=$(plant_stale_objects "$dest" "$dest.build.log" "$file")
+  case "$more" in UNLISTED*) printf 'check-archive: %s: no object depends on %s, so no rebuild could show the edit: %s\n' "$name" "$file" "$more" >&2; return 1 ;; esac
+  if [ -n "$more" ]; then
+    STALE_OBJS="${STALE_OBJS:+$STALE_OBJS
+}$more"
+  fi
+  return 0
 }
 
-# The directory a library's make puts its shared object in.
-app_dir() {
-  ( cd "$1" && "$MAKE_CMD" -pqn $MARGS 2>/dev/null | sed -n 's/^APP_DIR := //p' | head -1 | { read -r d; printf '%s/%s' "$(pwd)" "$d"; } )
-}
-
-# plant <name> <test> <which: core|storage|both> <file-in-core> <old> <new>
-# The storage edit, when both, is given as <storage-old> <storage-new>.
-build_and_run() {
-  name=$1 test=$2 core_dir=$3 stor_dir=$4
-  libpath="$(app_dir "$core_dir"):$(app_dir "$stor_dir")"
-  for d in "$stor_dir" "$core_dir"; do
-    if ! ( cd "$d" && "$MAKE_CMD" --no-print-directory all $MARGS ) \
-        > "$SCRATCH/$name.build.log" 2>&1; then
-      printf 'check-archive: %s: the planted copy did not build\n' "$name" >&2
-      tail -20 "$SCRATCH/$name.build.log" >&2
-      fail=1
-      return 1
+# archive_job <name> <test> <stale> <core-old> <core-new> <storage-old> <storage-new>
+# One plant, in a subshell of its own (plant_spawn): copies of the libraries
+# whose source it edits, built, and the hostile-archive tests run against
+# them. Leaves 0 for a plant that behaved.
+archive_job() {
+  name=$1 test=$2 stale=$3 core_old=$4 core_new=$5 stor_old=$6 stor_new=$7
+  dir="$PLANT_SCRATCH/$name"
+  mkdir -p "$dir/cwd"
+  libpath=
+  STALE_OBJS=
+  files=
+  if [ -n "$core_old" ]; then
+    edit_and_build core "$CORE" "$dir/defiant-core" "$stale" src/subject/subject.c \
+      "$core_old" "$core_new" || return 1
+    libpath="$dir/defiant-core/$BUILD_DIR/apps:$libpath"
+    files="$files src/subject/subject.c"
+  fi
+  if [ -n "$stor_old" ]; then
+    edit_and_build storage "$STOR" "$dir/defiant-storage" "$stale" src/snapshot.c \
+      "$stor_old" "$stor_new" || return 1
+    libpath="$dir/defiant-storage/$BUILD_DIR/apps:$libpath"
+    files="$files src/snapshot.c"
+  fi
+  if [ "$stale" = 1 ]; then
+    if [ -n "$STALE_OBJS" ]; then
+      printf 'check-archive: %s: caught by the stale-object check:%s edited, and not rebuilt:\n' "$name" "$files"
+      printf '%s\n' "$STALE_OBJS" | sed 's/^/check-archive:   /'
+      rm -rf "$dir"
+      return 0
     fi
-  done
+    printf 'check-archive: %s: every object that depends on the edit was rebuilt anyway, so the stale-object check was not shown to work\n' "$name" >&2
+    return 1
+  fi
+  if [ -n "$STALE_OBJS" ]; then
+    printf 'check-archive: %s: STALE OBJECT: the edit was not rebuilt into the library, so the defect never reached the tests:\n' "$name" >&2
+    printf '%s\n' "$STALE_OBJS" | sed 's/^/check-archive:   /' >&2
+    return 1
+  fi
   # Run from a directory of its own: the join plant creates files.
-  mkdir -p "$SCRATCH/cwd"
-  ( cd "$SCRATCH/cwd" && LD_LIBRARY_PATH="$libpath:${LD_LIBRARY_PATH:-}" \
-    "$BIN" --gtest_filter="$ALL" --gtest_brief=1 > "$SCRATCH/$name.log" 2>&1 )
+  ( cd "$dir/cwd" && LD_LIBRARY_PATH="$libpath${LD_LIBRARY_PATH:-}" \
+    "$BIN" --gtest_filter="$ALL" --gtest_brief=1 > "$dir/run.log" 2>&1 )
   rc=$?
+  status=0
   if [ $rc -eq 0 ]; then
     printf 'check-archive: %s: every test PASSED with the defect planted\n' "$name" >&2
-    fail=1
-  elif grep -q "^\[  FAILED  \] $test\b" "$SCRATCH/$name.log"; then
+    status=1
+  elif grep -q "^\[  FAILED  \] $test\b" "$dir/run.log"; then
     printf 'check-archive: %s: planted defect turned %s red\n' "$name" "$test"
   else
     printf 'check-archive: %s: red, but not by %s (exit %s)\n' "$name" "$test" "$rc" >&2
-    tail -15 "$SCRATCH/$name.log" >&2
-    fail=1
+    tail -15 "$dir/run.log" >&2
+    status=1
   fi
+  rm -rf "$dir"
+  return $status
 }
 
-# Scratch copies are made once per plant. Each is built against the real
-# prefix and loaded ahead of it through LD_LIBRARY_PATH.
+plant_hook_done() {
+  printf 'check-archive: every hostile-archive plant was seen to fail its test\n'
+}
+
+# plant <name> <test> <core-old> <core-new> <storage-old> <storage-new>
 plant() {
-  name=$1 test=$2 core_old=$3 core_new=$4 stor_old=$5 stor_new=$6
-  cdir="$SCRATCH/$name/defiant-core"
-  sdir="$SCRATCH/$name/defiant-storage"
-  copy_tree "$CORE" "$cdir"
-  copy_tree "$STOR" "$sdir"
-  if ! edit "$cdir" src/subject/subject.c "$core_old" "$core_new"; then
-    printf 'check-archive: %s: THE CORE EDIT DID NOT APPLY, nothing was tested\n' "$name" >&2
-    fail=1
-    return
-  fi
-  if cmp -s "$CORE/src/subject/subject.c" "$cdir/src/subject/subject.c"; then
-    printf 'check-archive: %s: the edited core file equals the original\n' "$name" >&2
-    fail=1
-    return
-  fi
-  if [ -n "$stor_old" ]; then
-    if ! edit "$sdir" src/snapshot.c "$stor_old" "$stor_new"; then
-      printf 'check-archive: %s: THE STORAGE EDIT DID NOT APPLY, nothing was tested\n' "$name" >&2
-      fail=1
-      return
-    fi
-    if cmp -s "$STOR/src/snapshot.c" "$sdir/src/snapshot.c"; then
-      printf 'check-archive: %s: the edited storage file equals the original\n' "$name" >&2
-      fail=1
-      return
-    fi
-  fi
-  build_and_run "$name" "$test" "$cdir" "$sdir"
-  rm -rf "$SCRATCH/$name"
+  plant_spawn archive_job "$1" "$2" 0 "$3" "$4" "$5" "$6"
 }
 
 RATIO='return uncomp > (uint64_t)max_ratio * comp;'
 
 # The member path is joined to the filesystem before it is judged. The name
 # is made into "./<name>" and created, which is what an extractor does.
-plant join Site.Traversal \
-  '    if (member->type != GARC_MEMBER_FILE ||
-        name_bad(member->name, member->name_length)) {' \
-  '    {
+JOIN_OLD='    if (member->type != GARC_MEMBER_FILE ||
+        name_bad(member->name, member->name_length)) {'
+JOIN_NEW='    {
       char joined[512];
       FILE * created;
       snprintf(joined, sizeof joined, "./%.*s", (int)member->name_length,
@@ -180,19 +236,20 @@ plant join Site.Traversal \
       }
     }
     if (member->type != GARC_MEMBER_FILE ||
-        name_bad(member->name, member->name_length)) {' '' ''
+        name_bad(member->name, member->name_length)) {'
+plant join Site.Traversal "$JOIN_OLD" "$JOIN_NEW" '' ''
 
 # The compression ratio is not judged.
 plant bomb Site.Bomb "$RATIO" 'return 0;' "$RATIO" 'return 0;'
 
 # A document that names a tenant is accepted.
-plant named-tenant Site.NamedTenant \
-  '  if (gtext_json_object_get(root, "tenant", 6) != NULL) {
+TENANT_OLD='  if (gtext_json_object_get(root, "tenant", 6) != NULL) {
     return GDEFCORE_ERR_INVALID;
-  }' \
-  '  if (gtext_json_object_get(root, "tenant", 6) != NULL && 0) {
+  }'
+TENANT_NEW='  if (gtext_json_object_get(root, "tenant", 6) != NULL && 0) {
     return GDEFCORE_ERR_INVALID;
-  }' '' ''
+  }'
+plant named-tenant Site.NamedTenant "$TENANT_OLD" "$TENANT_NEW" '' ''
 
 # An internal (decimal) id is accepted: the digits check and the canonical
 # public-id check both go, because the second also refuses "7".
@@ -217,7 +274,17 @@ plant installation Site.Installation \
   'span_is(type_text, type_len, "core.tenant")' \
   'span_is(type_text, type_len, "core.tenan_")' '' ''
 
-if [ "$fail" -ne 0 ]; then
-  exit 1
+# The stale-object plant. A copy starts from its tree's finished build, so the
+# edit has to be compiled into it; this one (the named-tenant edit) is made not
+# to be, and the gate has to refuse it as a STALE OBJECT. If it ever passes
+# instead, a warm copy could pass with the defect never built in. There is
+# nothing to be stale when the library has no build to copy.
+if [ -n "${GHOTI_CHECK_COLD:-}" ]; then
+  plant_say "check-archive: stale-object: SKIPPED: GHOTI_CHECK_COLD copies no build output, so no object can be stale"
+elif [ ! -d "$CORE/$BUILD_DIR/objects" ]; then
+  plant_say "check-archive: stale-object: SKIPPED: $CORE has no build in $BUILD_DIR, so no object can be stale"
+else
+  plant_spawn archive_job stale-object Site.NamedTenant 1 "$TENANT_OLD" "$TENANT_NEW" '' ''
 fi
-printf 'check-archive: every hostile-archive plant was seen to fail its test\n'
+
+plant_finish

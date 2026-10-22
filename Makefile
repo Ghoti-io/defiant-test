@@ -404,6 +404,7 @@ SQLITE_LIBS := $(call pkg_libs,$(SQLITE_PC))
 ARCHIVE_CFLAGS := $(call pkg_cflags,$(ARCHIVE_PC))
 ARCHIVE_LIBS := $(call pkg_libs,$(ARCHIVE_PC))
 STOR_CONFORMANCE_I :=
+STOR_PC ?= ghoti.io-defiant-storage$(BRANCH)
 ifeq ($(strip $(CORE_CFLAGS)),)
 ifndef SKIP_DEP_CHECK
 $(error ghoti.io-defiant-core was not found by pkg-config. Install defiant-core into PREFIX, or point PKG_CONFIG_PATH at the directory holding its .pc file.)
@@ -943,8 +944,16 @@ endif
 DEFIANT_CORE_SRC ?= ../defiant-core
 DEFIANT_STORAGE_SRC ?= ../defiant-storage
 
+# The plants build in copies of those two trees that start from their finished
+# builds (the helpers, plant-lib.sh, are defiant-storage's, installed with its
+# conformance suites). A copy compiles with the flags its tree did, or every
+# object would be compiled again, so the test data path each tree bakes into
+# its objects is handed to its copy as a make argument.
+STOR_CONFORMANCE := $(strip $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pkg-config --variable=conformance_dir $(STOR_PC) 2>/dev/null))
+PLANT_LIB = $(STOR_CONFORMANCE)/plant-lib.sh
+
 check-archive: $(APP_DIR)/testHarness$(EXE_EXTENSION) $(APP_DIR)/readzip ## Plants turn the hostile-archive tests red
-	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" GDEFTEST_READZIP="$(APP_DIR)/readzip" tools/check-archive.sh "$(APP_DIR)/testHarness$(EXE_EXTENSION)" "$(DEFIANT_CORE_SRC)" "$(DEFIANT_STORAGE_SRC)" "$(MAKE)" $(if $(PREFIX),PREFIX=$(PREFIX))
+	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" GDEFTEST_READZIP="$(APP_DIR)/readzip" GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-archive.sh "$(APP_DIR)/testHarness$(EXE_EXTENSION)" "$(DEFIANT_CORE_SRC)" "$(DEFIANT_STORAGE_SRC)" "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
 
 # The source trees the unsafe-list lint reads: this library and its siblings.
 DEFIANT_LINT_ROOTS ?= . $(DEFIANT_CORE_SRC) $(DEFIANT_STORAGE_SRC) ../defiant-storage-memory ../defiant-storage-sqlite ../defiant-web
