@@ -43,5 +43,7 @@ pass 'Site.RoundTrip'
 red 'Site.RoundTrip' lose
 pass 'Harness.Lint'
 red 'Harness.Lint' unmark
+pass 'Site.Sweep'
+red 'Site.Sweep' open
 pass 'Site.Scanner'
 red 'Site.Scanner' plant-id

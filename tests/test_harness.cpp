@@ -419,14 +419,14 @@ class Site : public ::testing::Test {
             session_.data(), session_.size()));
   }
 
-  void Publish(const char * alias, char id[GDEFCORE_PUBLIC_ID_LEN + 1]) {
+  void Publish(const char * alias, char id[GDEFCORE_PUBLIC_ID_LEN + 1],
+      const char * body = "Body") {
     GDEFCORE_Value values[2];
     const char * slots[2];
     size_t lens[2];
     int conflict = 1;
     char * token = NULL;
     size_t token_len = 0;
-    const char * body = "Body";
     GDEFCORE_Keyring * keyring =
         gdefcore_inst_tenant_keyring(inst_, tenant_, strlen(tenant_));
     ASSERT_EQ(GDEFCORE_OK,
@@ -1181,6 +1181,115 @@ TEST_F(Site, Bypass) {
   EXPECT_EQ(GDEFCORE_ERR_INVALID,
       gdefcore_access_read(catalog_, request_, post, strlen(post), "en", 2,
           "title", 5, &texts, &lens, &count, NULL));
+  gdefcore_routes_destroy(routes);
+}
+
+/* The conditional access sweep (AD-25, access-conditions story A7): a value
+ * only an authorized reader may see, a post's body, is swept across the site's
+ * own outputs, the front page's recent posts (a summary built from the body),
+ * the post's page and a read, for a visitor who may not read it and for one
+ * who may (the control: a sweep that cannot see the canary returns clean for
+ * the wrong reason), and again after the grant that allowed it is revoked.
+ * The plant opens the gate to the visitor, so the canary shows. */
+TEST_F(Site, Sweep) {
+  static const char kCanary[] = "CANARY-BODY-7f3a";
+  char post[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char reader[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Routes * routes = NULL;
+  GDEFCORE_Permission permission;
+  Open();
+  Install();
+  Login();
+  /* The body is limited to readers; the title is the kit's, anyone's. */
+  memset(&permission, 0, sizeof permission);
+  permission.size = sizeof permission;
+  permission.label = "Read post body";
+  permission.label_len = 14;
+  permission.module_name = "site";
+  permission.module_name_len = 4;
+  permission.action = "read";
+  permission.action_len = 4;
+  permission.condition = GDEFCORE_ACCESS_ANY;
+  permission.type_name = "site.post";
+  permission.type_name_len = 9;
+  permission.field = "body";
+  permission.field_len = 4;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_declare(catalog_, &permission));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_role_create(catalog_, "readers", 7, NULL));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant(catalog_, "readers", 7,
+                             "Read post body", 14, "core.role", 9));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant(catalog_, "readers", 7,
+                             "Read posts", 10, "core.role", 9));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_create(catalog_, reader));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_add_role(catalog_, reader,
+                             strlen(reader), "readers", 7));
+  Publish("canary", post, kCanary);
+  if (strcmp(Plant(), "open") == 0) {
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant(catalog_, "anonymous", 9,
+                               "Read post body", 14,
+                               GDEFCORE_ACCESS_CONFIRM_ANONYMOUS,
+                               strlen(GDEFCORE_ACCESS_CONFIRM_ANONYMOUS)));
+  }
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_create(NULL, &routes));
+  auto outputs = [&](const char * who) {
+    GDEFCORE_Request * req = NULL;
+    std::string out;
+    char * bytes = NULL;
+    size_t n = 0;
+    char ** texts = NULL;
+    size_t * lens = NULL;
+    size_t count = 0;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_request_create(storage_, sizeof storage_, 0, 0, NULL, &req));
+    if (who != NULL) {
+      EXPECT_EQ(GDEFCORE_OK,
+          gdefcore_request_set_principal(req, who, strlen(who)));
+    }
+    for (const char * path : {"/", "canary"}) {
+      if (gdefcore_render_page(catalog_, routes, req, path, strlen(path),
+              GDEFCORE_RENDER_PAGE_FUEL, &bytes, &n) == GDEFCORE_OK) {
+        out += "page " + std::string(path) + ": " + std::string(bytes, n) + "\n";
+        gdefcore_text_free(catalog_, bytes);
+      }
+    }
+    if (gdefcore_access_read(catalog_, req, post, strlen(post), "en", 2, "body",
+            4, &texts, &lens, &count, NULL) == GDEFCORE_OK) {
+      for (size_t i = 0; i < count; i++) {
+        out += "read: " + std::string(texts[i], lens[i]) + "\n";
+      }
+      gdefcore_values_free(catalog_, texts, lens, count);
+    }
+    gdefcore_request_destroy(req);
+    return out;
+  };
+  auto has = [](const std::string & text) {
+    return text.find(kCanary) != std::string::npos;
+  };
+  /* The visitor who may not read the body gets none of it, and does get the
+   * title (the sweep is not asking a page that is not there). */
+  std::string visitor = outputs(NULL);
+  EXPECT_FALSE(has(visitor)) << visitor;
+  EXPECT_NE(std::string::npos, visitor.find("page canary: ")) << visitor;
+  /* The control: the reader gets it from every output. */
+  std::string before = outputs(reader);
+  EXPECT_NE(std::string::npos, before.find(std::string("page /: ")));
+  EXPECT_TRUE(before.find(kCanary) != std::string::npos) << before;
+  EXPECT_NE(std::string::npos, before.find("read: " + std::string(kCanary)))
+      << before;
+  {
+    size_t front = before.find("page /: ");
+    size_t end = before.find("\npage canary: ");
+    ASSERT_NE(std::string::npos, front);
+    EXPECT_NE(std::string::npos,
+        before.substr(front, end - front).find(kCanary))
+        << "the recent-posts summary does not carry the body: " << before;
+  }
+  /* The grant is revoked: the reader's outputs hold none of it either. */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_revoke(catalog_, "readers", 7,
+                             "Read post body", 14));
+  std::string after = outputs(reader);
+  EXPECT_FALSE(has(after)) << after;
+  EXPECT_NE(std::string::npos, after.find("page canary: ")) << after;
   gdefcore_routes_destroy(routes);
 }
 
