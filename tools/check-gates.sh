@@ -47,3 +47,5 @@ pass 'Site.Sweep'
 red 'Site.Sweep' open
 pass 'Site.Scanner'
 red 'Site.Scanner' plant-id
+pass 'Site.MenuSweep'
+red 'Site.MenuSweep' menu-open

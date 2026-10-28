@@ -1293,6 +1293,274 @@ TEST_F(Site, Sweep) {
   gdefcore_routes_destroy(routes);
 }
 
+/* Navigation is an output too: a menu, a tab strip and a trail are derived from
+ * routes and from what the site stored, and each entry is the target route's to
+ * allow. Every entry of the admin side carries a canary label (a kernel link, a
+ * tab, an entry the site made, and a generated entry the site renamed), the
+ * visitor asks every output for the page that has them, and none of them shows.
+ * The control is staff, who hold the permission the routes name: they are shown
+ * all of it, so a sweep that cannot see the canary does not pass. Revoking the
+ * grant takes it from them. The plant opens the permission to the visitor and
+ * the gate turns red. */
+TEST_F(Site, MenuSweep) {
+  static const char kMark[] = "ADMIN-ENTRY-CANARY";
+  char post[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char staff[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Routes * routes = NULL;
+  GDEFCORE_Permission permission;
+  GDEFCORE_Route_Spec spec;
+  GDEFCORE_Route_Link link;
+  Open();
+  Install();
+  Login();
+  Publish("secret-post", post, "Body");
+  /* The pages of the admin side need a permission only staff hold. */
+  memset(&permission, 0, sizeof permission);
+  permission.size = sizeof permission;
+  permission.label = "Use the secret pages";
+  permission.label_len = 20;
+  permission.module_name = "site";
+  permission.module_name_len = 4;
+  permission.action = "secret.use";
+  permission.action_len = 10;
+  permission.condition = GDEFCORE_ACCESS_ANY;
+  permission.type_name = "site.post";
+  permission.type_name_len = 9;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_declare(catalog_, &permission));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_role_create(catalog_, "staff", 5, NULL));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant(catalog_, "staff", 5,
+                             "Use the secret pages", 20, "core.role", 9));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_create(catalog_, staff));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_add_role(catalog_, staff,
+                             strlen(staff), "staff", 5));
+  /* The routes, the kernel's links, the entry the site made and the one it
+   * renamed. */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_create(NULL, &routes));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_set_check(routes,
+                             gdefcore_access_route_check, catalog_));
+  auto add = [&](const char * machine, const char * path, const char * title,
+                 const char * perm, int kind, const char * parent) {
+    memset(&spec, 0, sizeof spec);
+    spec.size = sizeof spec;
+    spec.machine = machine;
+    spec.machine_len = strlen(machine);
+    spec.path = path;
+    spec.path_len = strlen(path);
+    spec.call_fn = [](const GDEFCORE_Route_Call *) {};
+    spec.title = title;
+    spec.title_len = strlen(title);
+    spec.permission = perm;
+    spec.permission_len = perm == NULL ? 0 : strlen(perm);
+    if (perm != NULL && std::string(path).find(":id") != std::string::npos) {
+      spec.entity_capture = "id";
+      spec.entity_capture_len = 2;
+    }
+    spec.kind = kind;
+    spec.parent = parent;
+    spec.parent_len = parent == NULL ? 0 : strlen(parent);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_route_add_spec(routes, &spec, NULL, NULL));
+  };
+  add("core.public", "/public", "Public", NULL, GDEFCORE_ROUTE_PAGE, NULL);
+  add("core.secret", "/secret", "Secret", "secret.use", GDEFCORE_ROUTE_PAGE, NULL);
+  add("core.secret-item", "/secret/:id", "Item", "secret.use", GDEFCORE_ROUTE_PAGE,
+      NULL);
+  add("core.secret-tab", "/secret/:id/tab", "ADMIN-ENTRY-CANARY tab", "secret.use",
+      GDEFCORE_ROUTE_TAB, "core.secret-item");
+  auto kernel = [&](const char * name, const char * menu, const char * label,
+                    const char * route, int weight) {
+    memset(&link, 0, sizeof link);
+    link.size = sizeof link;
+    link.name = name;
+    link.name_len = strlen(name);
+    link.menu = menu;
+    link.menu_len = strlen(menu);
+    link.label = label;
+    link.label_len = strlen(label);
+    link.route = route;
+    link.route_len = strlen(route);
+    link.weight = weight;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_add_link(routes, &link));
+  };
+  kernel("core.l-public", "main", "Public", "core.public", 0);
+  kernel("core.l-secret", "admin", "ADMIN-ENTRY-CANARY link", "core.secret", 0);
+  kernel("core.l-renamed", "main", "Plain label", "core.secret", 1);
+  kernel("core.l-item", "admin", "ADMIN-ENTRY-CANARY item", "core.secret-item", 1);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_menu_declare(catalog_));
+  {
+    GDEFCORE_Changeset * cs = NULL;
+    GDEFCORE_Menu_Override over;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_menu_stage_entry(cs, "site.sneaky", 11, "main", 4,
+            "ADMIN-ENTRY-CANARY site", 23, "core.secret", 11, "", 0, 2));
+    memset(&over, 0, sizeof over);
+    over.size = sizeof over;
+    over.label = "ADMIN-ENTRY-CANARY override";
+    over.label_len = 27;
+    over.hidden = -1;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_menu_stage_override(cs, "core.l-renamed", 14, &over));
+    {
+      static const char kConfirm[] = "core.menu-entry\ncore.menu-override";
+      ASSERT_EQ(GDEFCORE_OK,
+          gdefcore_changeset_apply(cs, kConfirm, sizeof kConfirm - 1));
+    }
+    gdefcore_changeset_destroy(cs);
+  }
+  if (strcmp(Plant(), "menu-open") == 0) {
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant(catalog_, "anonymous", 9,
+                               "Use the secret pages", 20,
+                               GDEFCORE_ACCESS_CONFIRM_ANONYMOUS,
+                               strlen(GDEFCORE_ACCESS_CONFIRM_ANONYMOUS)));
+  }
+  /* The front page draws both menus, and the post's tabs and trail. */
+  {
+    char ** ids = NULL;
+    size_t n = 0;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_ids(catalog_, "core.display", 12, &ids, &n));
+    for (size_t i = 0; i < n; i++) {
+      char ** t = NULL;
+      size_t * l = NULL;
+      size_t c = 0;
+      if (gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, ids[i],
+              strlen(ids[i]), "en", 2, "name", 4, &t, &l, &c) != GDEFCORE_OK) {
+        continue;
+      }
+      bool front = c > 0 && std::string(t[0], l[0]) == "front";
+      gdefcore_values_free(catalog_, t, l, c);
+      if (front) {
+        GDEFCORE_Changeset * cs = NULL;
+        GDEFCORE_Value value;
+        const char * panes[4] = {"side view recent", "side menu main",
+            "side menu admin", "main tabs tabs"};
+        size_t lens[4] = {16, 14, 15, 14};
+        memset(&value, 0, sizeof value);
+        value.size = sizeof value;
+        value.field = "panes";
+        value.field_len = 5;
+        value.texts = panes;
+        value.text_lens = lens;
+        value.count = 4;
+        ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+        ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_save(cs, ids[i], strlen(ids[i]), "en",
+                                   2, &value, 1));
+        ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "core.display", 12));
+        gdefcore_changeset_destroy(cs);
+      }
+    }
+    gdefcore_ids_free(catalog_, ids, n);
+  }
+  auto outputs = [&](const char * who) {
+    GDEFCORE_Request * req = NULL;
+    GDEFCORE_Route_Match * item = NULL;
+    GDEFCORE_Route_Match * tab = NULL;
+    std::string out;
+    const std::string item_path = std::string("/secret/") + post;
+    const std::string tab_path = item_path + "/tab";
+    auto add_menu = [&](const char * what, GDEFCORE_Result rc, GDEFCORE_Menu * menu) {
+      out += std::string(what) + "=" + gdefcore_result_string(rc) + ":";
+      for (size_t i = 0; i < gdefcore_menu_count(menu); i++) {
+        GDEFCORE_Menu_Item it;
+        memset(&it, 0, sizeof it);
+        it.size = sizeof it;
+        if (gdefcore_menu_item(menu, i, &it) == GDEFCORE_OK) {
+          out += "[" + std::string(it.label, it.label_len) + "|" +
+                 std::string(it.href, it.href_len) + "]";
+        }
+      }
+      out += "\n";
+      gdefcore_menu_free(menu);
+    };
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_request_create(storage_, sizeof storage_, 0, 0, NULL, &req));
+    if (who != NULL) {
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_request_set_principal(req, who, strlen(who)));
+    }
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_routes_match(routes, req, item_path.data(),
+                               item_path.size(), &item));
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_routes_match(routes, req, tab_path.data(),
+                               tab_path.size(), &tab));
+    for (const char * menu_name : {"main", "admin"}) {
+      GDEFCORE_Menu * m = NULL;
+      GDEFCORE_Result rc = gdefcore_menu_tree(catalog_, routes, req, item,
+          menu_name, strlen(menu_name), &m);
+      add_menu(menu_name, rc, rc == GDEFCORE_OK ? m : NULL);
+    }
+    {
+      GDEFCORE_Menu * m = NULL;
+      GDEFCORE_Result rc = gdefcore_menu_tabs(catalog_, routes, req, tab, &m);
+      add_menu("tabs", rc, rc == GDEFCORE_OK ? m : NULL);
+      m = NULL;
+      rc = gdefcore_menu_breadcrumbs(catalog_, routes, req, tab, NULL, 0, &m);
+      add_menu("crumbs", rc, rc == GDEFCORE_OK ? m : NULL);
+      m = NULL;
+      /* The editor's list is for who may edit menus: nobody here. */
+      rc = gdefcore_menu_entries(catalog_, routes, req, tab, &m);
+      add_menu("entries", rc, rc == GDEFCORE_OK ? m : NULL);
+    }
+    for (const char * kind : {"menu", "tabs", "breadcrumbs"}) {
+      for (const std::string & path : {item_path, tab_path}) {
+        char * bytes = NULL;
+        size_t n = 0;
+        const char * target = std::string(kind) == "menu" ? "admin" : "";
+        GDEFCORE_Result rc = gdefcore_render_widget(catalog_, routes, req, NULL, kind,
+            strlen(kind), target, strlen(target), path.data(), path.size(),
+            GDEFCORE_RENDER_PAGE_FUEL, &bytes, &n);
+        out += std::string("widget ") + kind + "=" + gdefcore_result_string(rc) + ":";
+        if (rc == GDEFCORE_OK) {
+          out += std::string(bytes, n);
+          gdefcore_text_free(catalog_, bytes);
+        }
+        out += "\n";
+      }
+    }
+    {
+      char * bytes = NULL;
+      size_t n = 0;
+      GDEFCORE_Result rc = gdefcore_render_page(catalog_, routes, req, "/", 1,
+          GDEFCORE_RENDER_PAGE_FUEL, &bytes, &n);
+      out += std::string("page=") + gdefcore_result_string(rc) + ":";
+      if (rc == GDEFCORE_OK) {
+        out += std::string(bytes, n);
+        gdefcore_text_free(catalog_, bytes);
+      }
+      out += "\n";
+    }
+    gdefcore_route_match_free(item);
+    gdefcore_route_match_free(tab);
+    gdefcore_request_destroy(req);
+    return out;
+  };
+  auto has = [](const std::string & text) {
+    return text.find(kMark) != std::string::npos;
+  };
+  /* The visitor is shown none of it, and is shown the public entry (the sweep
+   * is asking a menu that is there). */
+  std::string visitor = outputs(NULL);
+  EXPECT_FALSE(has(visitor)) << visitor;
+  EXPECT_NE(std::string::npos, visitor.find("Public")) << visitor;
+  /* The control: staff are shown every one of them, in every output. */
+  std::string before = outputs(staff);
+  EXPECT_NE(std::string::npos, before.find("ADMIN-ENTRY-CANARY link")) << before;
+  EXPECT_NE(std::string::npos, before.find("ADMIN-ENTRY-CANARY item")) << before;
+  EXPECT_NE(std::string::npos, before.find("ADMIN-ENTRY-CANARY tab")) << before;
+  EXPECT_NE(std::string::npos, before.find("ADMIN-ENTRY-CANARY site")) << before;
+  EXPECT_NE(std::string::npos, before.find("ADMIN-ENTRY-CANARY override")) << before;
+  {
+    size_t front = before.find("page=");
+    ASSERT_NE(std::string::npos, front);
+    EXPECT_NE(std::string::npos, before.substr(front).find(kMark))
+        << "the front page does not carry the entries";
+  }
+  /* The grant is revoked: staff are shown none of it either. */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_revoke(catalog_, "staff", 5,
+                             "Use the secret pages", 20));
+  std::string after = outputs(staff);
+  EXPECT_FALSE(has(after)) << after;
+  EXPECT_NE(std::string::npos, after.find("Public")) << after;
+  gdefcore_routes_destroy(routes);
+}
+
 TEST_F(Site, Scanner) {
   char post[GDEFCORE_PUBLIC_ID_LEN + 1];
   char * page = NULL;
