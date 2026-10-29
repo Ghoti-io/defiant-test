@@ -1562,6 +1562,321 @@ TEST_F(Site, MenuSweep) {
   gdefcore_routes_destroy(routes);
 }
 
+/* An edit of the menus is an output too: the editor renames an entry that only
+ * staff may follow to a canary, adds an entry with a canary label and hides it,
+ * and adds a third and undoes it. A visitor asks every output of the menus and
+ * is shown none of the three, and is refused an edit of its own with nothing
+ * written; the record of the last edit that undo reads names entries and
+ * revisions and holds none of the text. The controls are staff, who are shown
+ * the renamed entry, and the editor, whose list shows the hidden one marked and
+ * the undone one not at all. The plant opens the permission to edit menus to the
+ * visitor and the gate turns red. */
+TEST_F(Site, MenuEditSweep) {
+  static const char kA[] = "EDIT-CANARY-A-rename";
+  static const char kB[] = "EDIT-CANARY-B-hidden";
+  static const char kC[] = "EDIT-CANARY-C-undone";
+  static const char kV[] = "EDIT-CANARY-V-visitor";
+  char staff[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char editor[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Routes * routes = NULL;
+  GDEFCORE_Permission permission;
+  GDEFCORE_Route_Spec spec;
+  GDEFCORE_Route_Link link;
+  Open();
+  Install();
+  Login();
+  memset(&permission, 0, sizeof permission);
+  permission.size = sizeof permission;
+  permission.label = "Use the secret pages";
+  permission.label_len = 20;
+  permission.module_name = "site";
+  permission.module_name_len = 4;
+  permission.action = "secret.use";
+  permission.action_len = 10;
+  permission.condition = GDEFCORE_ACCESS_ANY;
+  permission.type_name = "site.post";
+  permission.type_name_len = 9;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_declare(catalog_, &permission));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_menu_declare(catalog_));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_role_create(catalog_, "staff", 5, NULL));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant(catalog_, "staff", 5,
+                             "Use the secret pages", 20, "core.role", 9));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_create(catalog_, staff));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_add_role(catalog_, staff,
+                             strlen(staff), "staff", 5));
+  /* The editor may edit menus and may not follow the secret pages. */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_role_create(catalog_, "menumen", 7, NULL));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant(catalog_, "menumen", 7,
+                             GDEFCORE_MENU_EDIT_ENTRY_LABEL,
+                             strlen(GDEFCORE_MENU_EDIT_ENTRY_LABEL), "core.role", 9));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant(catalog_, "menumen", 7,
+                             GDEFCORE_MENU_EDIT_OVERRIDE_LABEL,
+                             strlen(GDEFCORE_MENU_EDIT_OVERRIDE_LABEL), "core.role", 9));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_create(catalog_, editor));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_add_role(catalog_, editor,
+                             strlen(editor), "menumen", 7));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_create(NULL, &routes));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_set_check(routes,
+                             gdefcore_access_route_check, catalog_));
+  auto page = [&](const char * machine, const char * path, const char * title,
+                  const char * perm) {
+    memset(&spec, 0, sizeof spec);
+    spec.size = sizeof spec;
+    spec.machine = machine;
+    spec.machine_len = strlen(machine);
+    spec.path = path;
+    spec.path_len = strlen(path);
+    spec.call_fn = [](const GDEFCORE_Route_Call *) {};
+    spec.title = title;
+    spec.title_len = strlen(title);
+    spec.permission = perm;
+    spec.permission_len = perm == NULL ? 0 : strlen(perm);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_route_add_spec(routes, &spec, NULL, NULL));
+  };
+  page("core.public", "/public", "Public", NULL);
+  page("core.secret", "/secret", "Secret", "secret.use");
+  auto kernel = [&](const char * name, const char * label, const char * route,
+                    int weight) {
+    memset(&link, 0, sizeof link);
+    link.size = sizeof link;
+    link.name = name;
+    link.name_len = strlen(name);
+    link.menu = "main";
+    link.menu_len = 4;
+    link.label = label;
+    link.label_len = strlen(label);
+    link.route = route;
+    link.route_len = strlen(route);
+    link.weight = weight;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_add_link(routes, &link));
+  };
+  kernel("core.l-public", "Public", "core.public", 0);
+  kernel("core.l-secret", "Secret", "core.secret", 1);
+  /* The typed confirmation of a write of configuration: the types the changeset
+   * writes, sorted, one to a line. */
+  auto confirm_of = [](GDEFCORE_Changeset * changeset) {
+    std::set<std::string> types;
+    std::string joined;
+    for (size_t i = 0; i < gdefcore_changeset_touched_count(changeset); i++) {
+      const char * type = NULL;
+      size_t type_len = 0;
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_changeset_touched_at(changeset, i, NULL, NULL,
+                                 &type, &type_len, NULL));
+      types.insert(std::string(type, type_len));
+    }
+    for (const std::string & t : types) {
+      joined += (joined.empty() ? "" : "\n") + t;
+    }
+    return joined;
+  };
+  /* One edit, as @p who: staged and applied with the request. */
+  auto edit = [&](const char * who, int action, const char * name, const char * label,
+                  const char * route, GDEFCORE_Result * staged) {
+    GDEFCORE_Request * req = NULL;
+    GDEFCORE_Route_Match * match = NULL;
+    GDEFCORE_Menu * all = NULL;
+    GDEFCORE_Changeset * cs = NULL;
+    GDEFCORE_Menu_Edit e;
+    char version[GDEFCORE_MENU_VERSION_LEN + 1];
+    GDEFCORE_Result rc;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_request_create(storage_, sizeof storage_, 0, 0, NULL, &req));
+    if (who != NULL) {
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_request_set_principal(req, who, strlen(who)));
+    }
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_match(routes, req, "/public", 7, &match));
+    /* The version of the menus is the editor's to read; the visitor makes one up. */
+    memset(version, '0', GDEFCORE_MENU_VERSION_LEN);
+    version[GDEFCORE_MENU_VERSION_LEN] = '\0';
+    if (gdefcore_menu_entries(catalog_, routes, req, match, &all) == GDEFCORE_OK) {
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_menu_version(all, version, sizeof version));
+    }
+    gdefcore_menu_free(all);
+    memset(&e, 0, sizeof e);
+    e.size = sizeof e;
+    e.action = action;
+    e.name = name;
+    e.name_len = strlen(name);
+    e.label = label;
+    e.label_len = strlen(label);
+    e.menu = "main";
+    e.menu_len = 4;
+    e.route = route;
+    e.route_len = strlen(route);
+    e.version = version;
+    e.version_len = strlen(version);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    gdefcore_changeset_set_request(cs, req);
+    rc = gdefcore_menu_stage_edit(cs, routes, req, match, &e);
+    *staged = rc;
+    if (rc == GDEFCORE_OK && gdefcore_changeset_touched_count(cs) > 0) {
+      std::string confirm = confirm_of(cs);
+      *staged = gdefcore_changeset_apply(cs, confirm.data(), confirm.size());
+    }
+    gdefcore_changeset_destroy(cs);
+    gdefcore_route_match_free(match);
+    gdefcore_request_destroy(req);
+  };
+  GDEFCORE_Result got = GDEFCORE_OK;
+  edit(editor, GDEFCORE_MENU_ACT_RENAME, "core.l-secret", kA, "", &got);
+  ASSERT_EQ(GDEFCORE_OK, got) << "the editor renames a generated entry";
+  edit(editor, GDEFCORE_MENU_ACT_ADD, "site.hidden-canary", kB, "core.secret", &got);
+  ASSERT_EQ(GDEFCORE_OK, got);
+  edit(editor, GDEFCORE_MENU_ACT_HIDE, "site.hidden-canary", "", "", &got);
+  ASSERT_EQ(GDEFCORE_OK, got);
+  edit(editor, GDEFCORE_MENU_ACT_ADD, "site.undone-canary", kC, "core.public", &got);
+  ASSERT_EQ(GDEFCORE_OK, got);
+  {
+    /* The undo of that last edit, as the editor. */
+    GDEFCORE_Request * req = NULL;
+    GDEFCORE_Changeset * cs = NULL;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_request_create(storage_, sizeof storage_, 0, 0, NULL, &req));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_request_set_principal(req, editor, strlen(editor)));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    gdefcore_changeset_set_request(cs, req);
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_menu_stage_undo(cs, req));
+    {
+      std::string confirm = confirm_of(cs);
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, confirm.data(), confirm.size()));
+    }
+    gdefcore_changeset_destroy(cs);
+    gdefcore_request_destroy(req);
+  }
+  if (strcmp(Plant(), "menu-edit-open") == 0) {
+    for (const char * label : {GDEFCORE_MENU_EDIT_ENTRY_LABEL,
+             GDEFCORE_MENU_EDIT_OVERRIDE_LABEL}) {
+      ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant(catalog_, "anonymous", 9, label,
+                                 strlen(label), GDEFCORE_ACCESS_CONFIRM_ANONYMOUS,
+                                 strlen(GDEFCORE_ACCESS_CONFIRM_ANONYMOUS)));
+    }
+  }
+  /* The visitor tries an edit of its own: refused, with nothing written. */
+  edit(NULL, GDEFCORE_MENU_ACT_RENAME, "core.l-public", kV, "", &got);
+  EXPECT_NE(GDEFCORE_OK, got) << "a visitor edited the menus";
+  {
+    /* Nor is the visitor told whether there is an edit to undo. */
+    GDEFCORE_Request * req = NULL;
+    GDEFCORE_Changeset * cs = NULL;
+    size_t refusal_len = 0;
+    const char * refusal;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_request_create(storage_, sizeof storage_, 0, 0, NULL, &req));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    gdefcore_changeset_set_request(cs, req);
+    EXPECT_NE(GDEFCORE_OK, gdefcore_menu_stage_undo(cs, req))
+        << "a visitor staged the undo of the last menu edit";
+    refusal = gdefcore_changeset_refusal(cs, &refusal_len);
+    EXPECT_EQ(std::string("That edit is not allowed."),
+        std::string(refusal == NULL ? "" : refusal, refusal_len));
+    gdefcore_changeset_destroy(cs);
+    gdefcore_request_destroy(req);
+  }
+  auto outputs = [&](const char * who) {
+    GDEFCORE_Request * req = NULL;
+    GDEFCORE_Route_Match * match = NULL;
+    std::string out;
+    auto add_menu = [&](const char * what, GDEFCORE_Result rc, GDEFCORE_Menu * menu) {
+      out += std::string(what) + "=" + gdefcore_result_string(rc) + ":";
+      for (size_t i = 0; i < gdefcore_menu_count(menu); i++) {
+        GDEFCORE_Menu_Item it;
+        memset(&it, 0, sizeof it);
+        it.size = sizeof it;
+        if (gdefcore_menu_item(menu, i, &it) == GDEFCORE_OK) {
+          out += "[" + std::string(it.label, it.label_len) + "|" +
+                 std::string(it.name, it.name_len) + (it.hidden ? "|hidden" : "") + "]";
+        }
+      }
+      out += "\n";
+      gdefcore_menu_free(menu);
+    };
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_request_create(storage_, sizeof storage_, 0, 0, NULL, &req));
+    if (who != NULL) {
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_request_set_principal(req, who, strlen(who)));
+    }
+    EXPECT_EQ(GDEFCORE_OK, gdefcore_routes_match(routes, req, "/public", 7, &match));
+    {
+      GDEFCORE_Menu * m = NULL;
+      GDEFCORE_Result rc = gdefcore_menu_tree(catalog_, routes, req, match, "main", 4, &m);
+      add_menu("main", rc, rc == GDEFCORE_OK ? m : NULL);
+      m = NULL;
+      rc = gdefcore_menu_tabs(catalog_, routes, req, match, &m);
+      add_menu("tabs", rc, rc == GDEFCORE_OK ? m : NULL);
+      m = NULL;
+      rc = gdefcore_menu_breadcrumbs(catalog_, routes, req, match, NULL, 0, &m);
+      add_menu("crumbs", rc, rc == GDEFCORE_OK ? m : NULL);
+      m = NULL;
+      rc = gdefcore_menu_entries(catalog_, routes, req, match, &m);
+      add_menu("entries", rc, rc == GDEFCORE_OK ? m : NULL);
+    }
+    {
+      char * bytes = NULL;
+      size_t n = 0;
+      GDEFCORE_Result rc = gdefcore_render_widget(catalog_, routes, req, NULL, "menu", 4,
+          "main", 4, "/public", 7, GDEFCORE_RENDER_PAGE_FUEL, &bytes, &n);
+      out += std::string("widget=") + gdefcore_result_string(rc) + ":";
+      if (rc == GDEFCORE_OK) {
+        out += std::string(bytes, n);
+        gdefcore_text_free(catalog_, bytes);
+      }
+      out += "\n";
+    }
+    gdefcore_route_match_free(match);
+    gdefcore_request_destroy(req);
+    return out;
+  };
+  auto has = [](const std::string & text, const char * what) {
+    return text.find(what) != std::string::npos;
+  };
+  std::string visitor = outputs(NULL);
+  for (const char * canary : {kA, kB, kC, kV}) {
+    EXPECT_FALSE(has(visitor, canary)) << canary << "\n" << visitor;
+  }
+  EXPECT_TRUE(has(visitor, "Public")) << "CONTROL: the sweep asked a menu that is there\n" << visitor;
+  /* Staff follow the secret page, so they are shown the renamed entry, and not
+   * the hidden one, nor the one that was undone. */
+  std::string staffs = outputs(staff);
+  EXPECT_TRUE(has(staffs, kA)) << "CONTROL: the rename is real\n" << staffs;
+  EXPECT_FALSE(has(staffs, kB)) << staffs;
+  EXPECT_FALSE(has(staffs, kC)) << staffs;
+  /* The editor's list shows the hidden entry, marked, and not the undone one. */
+  std::string editors = outputs(editor);
+  EXPECT_TRUE(has(editors, "[EDIT-CANARY-B-hidden|site.hidden-canary|hidden]"))
+      << "CONTROL: the editor is shown the hidden entry\n" << editors;
+  EXPECT_FALSE(has(editors, kC)) << editors;
+  /* The record the last edit left names entries and revisions, and no text. */
+  {
+    char ** ids = NULL;
+    size_t n = 0;
+    size_t records = 0;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_ids(catalog_, GDEFCORE_MENU_CHANGE_TYPE,
+                               strlen(GDEFCORE_MENU_CHANGE_TYPE), &ids, &n));
+    for (size_t i = 0; i < n; i++) {
+      for (const char * field : {"name", "entities"}) {
+        char ** t = NULL;
+        size_t * l = NULL;
+        size_t c = 0;
+        if (gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_CURRENT, ids[i],
+                strlen(ids[i]), "en", 2, field, strlen(field), &t, &l, &c) ==
+            GDEFCORE_OK) {
+          for (size_t k = 0; k < c; k++) {
+            std::string v(t[k], l[k]);
+            records += 1;
+            for (const char * canary : {kA, kB, kC, kV}) {
+              EXPECT_FALSE(has(v, canary)) << "the record holds text: " << v;
+            }
+          }
+          gdefcore_values_free(catalog_, t, l, c);
+        }
+      }
+    }
+    gdefcore_ids_free(catalog_, ids, n);
+    EXPECT_GT(records, 0u) << "CONTROL: the record was read";
+  }
+  gdefcore_routes_destroy(routes);
+}
+
 /* A layout is an output too: it places the widgets that draw a post's title, its
  * content, the recent posts, the menu and the trail, and a rule chooses it by
  * path. The body of a post is given to readers only, and a canary is put in it;
