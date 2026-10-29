@@ -51,3 +51,5 @@ pass 'Site.MenuSweep'
 red 'Site.MenuSweep' menu-open
 pass 'Site.LayoutSweep'
 red 'Site.LayoutSweep' layout-open
+pass 'Site.SettingsSweep'
+red 'Site.SettingsSweep' settings-open

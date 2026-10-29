@@ -53,6 +53,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
 #include <random>
@@ -1715,6 +1716,221 @@ TEST_F(Site, LayoutSweep) {
   EXPECT_FALSE(has(after)) << after;
   EXPECT_NE(std::string::npos, after.find("layout canary: wide")) << after;
   gdefcore_routes_destroy(routes);
+}
+
+
+#define DEFTEST_STR2(x) #x
+#define DEFTEST_STR(x) DEFTEST_STR2(x)
+
+/* The module `vault`: three settings in one group, two of them environment-local
+ * (one a secret) and one a site's own. */
+struct Vault {
+  GDEFCORE_Module_Manifest man;
+  GDEFCORE_Module_Setting settings[3];
+  void Build() {
+    static const char * kNames[3] = {"vault.banner", "vault.api_key", "vault.note"};
+    static const char * kLabels[3] = {"Banner", "API key", "Note"};
+    memset(&man, 0, sizeof man);
+    memset(settings, 0, sizeof settings);
+    for (int i = 0; i < 3; i++) {
+      settings[i].size = sizeof settings[i];
+      settings[i].name = kNames[i];
+      settings[i].name_len = strlen(kNames[i]);
+      settings[i].type = "text";
+      settings[i].type_len = 4;
+      settings[i].label = kLabels[i];
+      settings[i].label_len = strlen(kLabels[i]);
+      settings[i].group = "general";
+      settings[i].group_len = 7;
+      settings[i].environment_local = i < 2;
+      settings[i].secret = i == 1;
+    }
+    man.size = sizeof man;
+    man.core_token = DEFTEST_STR(GHOTIIO_DEFCORE_NAME);
+    man.core_token_len = strlen(man.core_token);
+    man.name = "vault";
+    man.name_len = 5;
+    man.schema_version = 1;
+    man.settings = settings;
+    man.nsettings = 3;
+  }
+};
+
+Vault g_vault;
+
+extern "C" const GDEFCORE_Module_Manifest * VaultEntry(void) { return &g_vault.man; }
+
+/* A setting is an output too: the form that edits it, the page that shows the
+ * site's name, the export of the site's settings and the rows the tenant keeps.
+ * The values of a banner (environment-local), a key (local and secret) and a note
+ * (the site's own) are canaries. The visitor, who may not edit settings, is
+ * shown none of them by any output; the editor, the control, is shown the note
+ * and the banner in the form and never the key; no row of the tenant and no
+ * export holds a local value. The plant gives the visitor the permission to edit
+ * settings and the gate turns red. */
+TEST_F(Site, SettingsSweep) {
+  static const char kBanner[] = "CANARY-BANNER-77e1";
+  static const char kKey[] = "CANARY-KEY-5d20";
+  static const char kNote[] = "CANARY-NOTE-0c9f";
+  GDEFCORE_Host * host = NULL;
+  GDEFCORE_Changeset * cs = NULL;
+  char editor[GDEFCORE_PUBLIC_ID_LEN + 1];
+  Open();
+  Install();
+  Login();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_host_open(site_, NULL, &host));
+  gdefcore_catalog_bind_host(catalog_, host);
+  g_vault = Vault();
+  g_vault.Build();
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_install_guest(host, VaultEntry));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_module_enable(host, cs, "vault", 5));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "vault", 5));
+  gdefcore_changeset_destroy(cs);
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_role_create(catalog_, "keepers", 7, NULL));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant(catalog_, "keepers", 7,
+                             GDEFCORE_SETTINGS_EDIT_LABEL,
+                             strlen(GDEFCORE_SETTINGS_EDIT_LABEL), "core.role", 9));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_create(catalog_, editor));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_add_role(catalog_, editor,
+                             strlen(editor), "keepers", 7));
+  {
+    GDEFCORE_Request * req = NULL;
+    GDEFCORE_Setting_Change c[3];
+    memset(c, 0, sizeof c);
+    const char * names[3] = {"vault.banner", "vault.api_key", "vault.note"};
+    const char * values[3] = {kBanner, kKey, kNote};
+    for (int i = 0; i < 3; i++) {
+      c[i].size = sizeof c[i];
+      c[i].name = names[i];
+      c[i].name_len = strlen(names[i]);
+      c[i].value = values[i];
+      c[i].value_len = strlen(values[i]);
+    }
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_request_create(storage_, sizeof storage_, 0, 0, NULL, &req));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_request_set_principal(req, editor, strlen(editor)));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_settings_save(catalog_, req, "vault.general", 13,
+                               NULL, c, 3, NULL, NULL, NULL));
+    gdefcore_request_destroy(req);
+  }
+  if (strcmp(Plant(), "settings-open") == 0) {
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant(catalog_, "anonymous", 9,
+                               GDEFCORE_SETTINGS_EDIT_LABEL,
+                               strlen(GDEFCORE_SETTINGS_EDIT_LABEL),
+                               GDEFCORE_ACCESS_CONFIRM_ANONYMOUS,
+                               strlen(GDEFCORE_ACCESS_CONFIRM_ANONYMOUS)));
+  }
+  auto outputs = [&](const char * who) {
+    GDEFCORE_Request * req = NULL;
+    std::string out;
+    char * bytes = NULL;
+    size_t n = 0;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_request_create(storage_, sizeof storage_, 0, 0, NULL, &req));
+    if (who != NULL) {
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_request_set_principal(req, who, strlen(who)));
+    }
+    for (const char * group : {"vault.general", "core.site"}) {
+      GDEFCORE_Result rc = gdefcore_settings_form_html(catalog_, req, group,
+          strlen(group), "/x", "tok", &bytes, &n);
+      out += std::string("form ") + group + ": " +
+             (rc == GDEFCORE_OK ? std::string(bytes, n) : std::string("<none>")) + "\n";
+      if (rc == GDEFCORE_OK) {
+        gdefcore_text_free(catalog_, bytes);
+      }
+    }
+    if (gdefcore_render_page(catalog_, NULL, req, "/", 1, GDEFCORE_RENDER_PAGE_FUEL,
+            &bytes, &n) == GDEFCORE_OK) {
+      out += "page: " + std::string(bytes, n) + "\n";
+      gdefcore_text_free(catalog_, bytes);
+    }
+    gdefcore_request_destroy(req);
+    return out;
+  };
+  /* A form writes its digits as character references; a browser reads them as
+   * the digits. */
+  auto decode = [](const std::string & html) {
+    std::string out;
+    for (size_t i = 0; i < html.size();) {
+      if (html.compare(i, 2, "&#") == 0 && i + 5 <= html.size() && html[i + 4] == ';') {
+        int code = atoi(html.substr(i + 2, 2).c_str());
+        if (code >= 48 && code <= 57) {
+          out += (char)code;
+          i += 5;
+          continue;
+        }
+      }
+      out += html[i++];
+    }
+    return out;
+  };
+  auto has = [](const std::string & text, const char * canary) {
+    return text.find(canary) != std::string::npos;
+  };
+  std::string visitor = decode(outputs(NULL));
+  EXPECT_FALSE(has(visitor, kBanner)) << visitor;
+  EXPECT_FALSE(has(visitor, kKey)) << visitor;
+  EXPECT_FALSE(has(visitor, kNote)) << visitor;
+  /* The control: the editor is shown the banner and the note, which are not
+   * secret, and never the key. */
+  std::string seen = decode(outputs(editor));
+  EXPECT_TRUE(has(seen, kBanner)) << seen;
+  EXPECT_TRUE(has(seen, kNote)) << seen;
+  EXPECT_FALSE(has(seen, kKey)) << seen;
+  EXPECT_NE(std::string::npos, seen.find(">Set<")) << seen;
+  /* The export holds the site's own note and no local value. */
+  {
+    GDEFCORE_Patch * files = NULL;
+    size_t n = 0;
+    std::string text;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_settings_export(catalog_, &files, &n));
+    for (size_t i = 0; i < n; i++) {
+      text += std::string(files[i].path, files[i].path_len) + "=" +
+              std::string((const char *)files[i].bytes, files[i].len) + "\n";
+    }
+    gdefcore_patch_free(catalog_, files, n);
+    EXPECT_TRUE(has(text, kNote)) << text;
+    EXPECT_FALSE(has(text, kBanner)) << text;
+    EXPECT_FALSE(has(text, kKey)) << text;
+    EXPECT_EQ(std::string::npos, text.find("vault.banner")) << text;
+  }
+  /* The data set of the tenant, read as plain text member by member, holds no
+   * local value. */
+  {
+    uint8_t * zip = NULL;
+    size_t zip_len = 0;
+    GARC_Stream * stream = NULL;
+    GARC_Archive * archive = NULL;
+    GARC_Limits alimits;
+    const GARC_Member * member = NULL;
+    std::string all;
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_snapshot_export(site_, (const char *)storage_,
+                               sizeof storage_, NULL, &zip, &zip_len));
+    ASSERT_EQ(GARC_OK, garc_stream_create_memory(zip, zip_len, &stream));
+    garc_limits_default(&alimits);
+    ASSERT_EQ(GARC_OK, garc_open(stream, &alimits, &archive));
+    while (garc_next(archive, &member) == GARC_OK) {
+      std::vector<char> buf(member->size + 1);
+      size_t got = 0;
+      size_t total = 0;
+      while (total < member->size &&
+             garc_read_member(archive, buf.data() + total, member->size - total, &got) ==
+                 GARC_OK &&
+             got > 0) {
+        total += got;
+      }
+      all.append(buf.data(), total);
+    }
+    garc_close(archive);
+    garc_stream_destroy(stream);
+    gdefstor_bytes_free(NULL, zip);
+    EXPECT_FALSE(has(all, kBanner));
+    EXPECT_FALSE(has(all, kKey));
+    EXPECT_TRUE(has(all, kNote)) << "CONTROL: the site's own value is in its truth";
+  }
+  gdefcore_catalog_bind_host(catalog_, NULL);
+  gdefcore_host_destroy(host);
 }
 
 TEST_F(Site, Scanner) {
