@@ -1431,9 +1431,9 @@ TEST_F(Site, MenuSweep) {
       if (front) {
         GDEFCORE_Changeset * cs = NULL;
         GDEFCORE_Value value;
-        const char * panes[4] = {"side view recent", "side menu main",
+        const char * panes[4] = {"side recent", "side menu main",
             "side menu admin", "main tabs tabs"};
-        size_t lens[4] = {16, 14, 15, 14};
+        size_t lens[4] = {11, 14, 15, 14};
         memset(&value, 0, sizeof value);
         value.size = sizeof value;
         value.field = "panes";
@@ -1558,6 +1558,162 @@ TEST_F(Site, MenuSweep) {
   std::string after = outputs(staff);
   EXPECT_FALSE(has(after)) << after;
   EXPECT_NE(std::string::npos, after.find("Public")) << after;
+  gdefcore_routes_destroy(routes);
+}
+
+/* A layout is an output too: it places the widgets that draw a post's title, its
+ * content, the recent posts, the menu and the trail, and a rule chooses it by
+ * path. The body of a post is given to readers only, and a canary is put in it;
+ * the visitor asks every layout the site has (the front page's, the post page's,
+ * and a layout a rule of the site chose for a path of its own) and is shown none
+ * of it, while a reader, the control, is shown it in the layouts that carry the
+ * content, so a sweep that cannot see the canary does not pass. Revoking the
+ * grant takes it from the reader. The plant opens the body to the visitor and
+ * the gate turns red. */
+TEST_F(Site, LayoutSweep) {
+  static const char kCanary[] = "CANARY-LAYOUT-b21c";
+  char post[GDEFCORE_PUBLIC_ID_LEN + 1];
+  char reader[GDEFCORE_PUBLIC_ID_LEN + 1];
+  GDEFCORE_Routes * routes = NULL;
+  GDEFCORE_Permission permission;
+  Open();
+  Install();
+  Login();
+  memset(&permission, 0, sizeof permission);
+  permission.size = sizeof permission;
+  permission.label = "Read post body";
+  permission.label_len = 14;
+  permission.module_name = "site";
+  permission.module_name_len = 4;
+  permission.action = "read";
+  permission.action_len = 4;
+  permission.condition = GDEFCORE_ACCESS_ANY;
+  permission.type_name = "site.post";
+  permission.type_name_len = 9;
+  permission.field = "body";
+  permission.field_len = 4;
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_declare(catalog_, &permission));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_role_create(catalog_, "readers", 7, NULL));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant(catalog_, "readers", 7,
+                             "Read post body", 14, "core.role", 9));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant(catalog_, "readers", 7,
+                             "Read posts", 10, "core.role", 9));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_create(catalog_, reader));
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_principal_add_role(catalog_, reader,
+                             strlen(reader), "readers", 7));
+  Publish("canary", post, kCanary);
+  /* A layout of every widget that reads an entity or the site, and rules that
+   * choose it for the front page and for a path of its own. */
+  {
+    GDEFCORE_Changeset * cs = NULL;
+    char id[GDEFCORE_PUBLIC_ID_LEN + 1];
+    const char * name[1] = {"wide"};
+    size_t name_len[1] = {4};
+    const char * tmpl[1] = {"layout"};
+    size_t tmpl_len[1] = {6};
+    const char * panes[6] = {"main content", "main title", "side recent",
+        "side sitename", "side messages", "side breadcrumbs"};
+    size_t lens[6] = {12, 10, 11, 13, 13, 16};
+    GDEFCORE_Value v[3];
+    GDEFCORE_Layout_Rule rule;
+    memset(v, 0, sizeof v);
+    v[0].size = sizeof v[0];
+    v[0].field = "name";
+    v[0].field_len = 4;
+    v[0].texts = name;
+    v[0].text_lens = name_len;
+    v[0].count = 1;
+    v[1].size = sizeof v[1];
+    v[1].field = "layout";
+    v[1].field_len = 6;
+    v[1].texts = tmpl;
+    v[1].text_lens = tmpl_len;
+    v[1].count = 1;
+    v[2].size = sizeof v[2];
+    v[2].field = "panes";
+    v[2].field_len = 5;
+    v[2].texts = panes;
+    v[2].text_lens = lens;
+    v[2].count = 6;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_create(catalog_, "core.display", 12, id, NULL));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_save(cs, id, strlen(id), "en", 2, v, 3));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "core.display", 12));
+    gdefcore_changeset_destroy(cs);
+    memset(&rule, 0, sizeof rule);
+    rule.size = sizeof rule;
+    rule.path = "/";
+    rule.path_len = 1;
+    rule.layout = "wide";
+    rule.layout_len = 4;
+    rule.exact = 1;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_layout_stage_rule(cs, "site.front", 10, &rule));
+    rule.exact = 0;
+    rule.type = "site.post";
+    rule.type_len = 9;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_layout_stage_rule(cs, "site.post", 9, &rule));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_changeset_apply(cs, "core.layout-rule", 16));
+    gdefcore_changeset_destroy(cs);
+  }
+  if (strcmp(Plant(), "layout-open") == 0) {
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_access_grant(catalog_, "anonymous", 9,
+                               "Read post body", 14,
+                               GDEFCORE_ACCESS_CONFIRM_ANONYMOUS,
+                               strlen(GDEFCORE_ACCESS_CONFIRM_ANONYMOUS)));
+  }
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_routes_create(NULL, &routes));
+  auto outputs = [&](const char * who) {
+    GDEFCORE_Request * req = NULL;
+    std::string out;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_request_create(storage_, sizeof storage_, 0, 0, NULL, &req));
+    if (who != NULL) {
+      EXPECT_EQ(GDEFCORE_OK, gdefcore_request_set_principal(req, who, strlen(who)));
+    }
+    for (const char * path : {"/", "canary"}) {
+      char * bytes = NULL;
+      size_t n = 0;
+      char * name = NULL;
+      size_t name_len = 0;
+      GDEFCORE_Result rc = gdefcore_render_page(catalog_, routes, req, path,
+          strlen(path), GDEFCORE_RENDER_PAGE_FUEL, &bytes, &n);
+      out += "page " + std::string(path) + ": " +
+             (rc == GDEFCORE_OK ? std::string(bytes, n) : std::string("<none>")) +
+             "\n";
+      if (rc == GDEFCORE_OK) {
+        gdefcore_text_free(catalog_, bytes);
+      }
+      /* What chose it is a name, and the offers are names: no entity value. */
+      if (gdefcore_layout_select(catalog_, routes, req, path, strlen(path), &name,
+              &name_len) == GDEFCORE_OK) {
+        out += "layout " + std::string(path) + ": " + std::string(name, name_len) +
+               "\n";
+        gdefcore_text_free(catalog_, name);
+      }
+    }
+    gdefcore_request_destroy(req);
+    return out;
+  };
+  auto has = [](const std::string & text) {
+    return text.find(kCanary) != std::string::npos;
+  };
+  /* The visitor who may not read the body gets none of it from any layout, and
+   * does get the title and the layout that was chosen. */
+  std::string visitor = outputs(NULL);
+  EXPECT_FALSE(has(visitor)) << visitor;
+  EXPECT_NE(std::string::npos, visitor.find("layout canary: wide")) << visitor;
+  EXPECT_NE(std::string::npos, visitor.find("layout /: wide")) << visitor;
+  /* The control: the reader is shown it by the layout that carries the content. */
+  std::string before = outputs(reader);
+  EXPECT_TRUE(has(before)) << before;
+  /* The grant is revoked: the reader's layouts hold none of it either. */
+  ASSERT_EQ(GDEFCORE_OK, gdefcore_access_revoke(catalog_, "readers", 7,
+                             "Read post body", 14));
+  std::string after = outputs(reader);
+  EXPECT_FALSE(has(after)) << after;
+  EXPECT_NE(std::string::npos, after.find("layout canary: wide")) << after;
   gdefcore_routes_destroy(routes);
 }
 
