@@ -53,3 +53,5 @@ pass 'Site.LayoutSweep'
 red 'Site.LayoutSweep' layout-open
 pass 'Site.SettingsSweep'
 red 'Site.SettingsSweep' settings-open
+pass 'Site.MessageSweep'
+red 'Site.MessageSweep' message-open

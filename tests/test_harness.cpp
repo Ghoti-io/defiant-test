@@ -1933,6 +1933,148 @@ TEST_F(Site, SettingsSweep) {
   gdefcore_host_destroy(host);
 }
 
+/* A message is an output too: the notice a save left for a session, shown by the
+ * messages widget of a page. Its text is a canary. A visitor, and a different
+ * session of the same account, ask for the front page and are shown none of it,
+ * and do not use it up; the tenant's data set, read member by member, holds
+ * neither the text nor the session. The control is the session it was left, shown
+ * it once. The plant binds the visitor's request to that session and the gate
+ * turns red. */
+TEST_F(Site, MessageSweep) {
+  static const char kCanary[] = "CANARY-MESSAGE-3b7e";
+  GDEFCORE_Keyring * keyring = NULL;
+  GDEFCORE_Changeset * cs = NULL;
+  std::string front;
+  std::string other;
+  Open();
+  Install();
+  Login();
+  keyring = gdefcore_inst_tenant_keyring(inst_, tenant_, strlen(tenant_));
+  ASSERT_NE(keyring, nullptr);
+  {
+    char ** ids = NULL;
+    size_t n = 0;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_entity_ids(catalog_, "core.display", 12, &ids, &n));
+    for (size_t i = 0; i < n && front.empty(); i++) {
+      char ** t = NULL;
+      size_t * l = NULL;
+      size_t c = 0;
+      if (gdefcore_entity_values(catalog_, NULL, GDEFCORE_VIEW_PUBLISHED, ids[i],
+              strlen(ids[i]), "en", 2, "name", 4, &t, &l, &c) == GDEFCORE_OK) {
+        if (c > 0 && std::string(t[0], l[0]) == "front") {
+          front = ids[i];
+        }
+        gdefcore_values_free(catalog_, t, l, c);
+      }
+    }
+    gdefcore_ids_free(catalog_, ids, n);
+  }
+  ASSERT_FALSE(front.empty());
+  {
+    const char * panes[1] = {"main messages"};
+    size_t lens[1] = {strlen(panes[0])};
+    GDEFCORE_Value v;
+    memset(&v, 0, sizeof v);
+    v.size = sizeof v;
+    v.field = "panes";
+    v.field_len = 5;
+    v.texts = panes;
+    v.text_lens = lens;
+    v.count = 1;
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_prepare(catalog_, NULL, 0, &cs));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_entity_save(cs, front.data(), front.size(), "en", 2, &v, 1));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_changeset_apply(cs, "core.display", 12));
+    gdefcore_changeset_destroy(cs);
+  }
+  {
+    char * token = NULL;
+    size_t n = 0;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_account_login(catalog_, keyring, root_, sizeof root_, "ada", 3,
+            "secret", 6, kLife, &token, &n));
+    other.assign(token, n);
+    gdefcore_text_free(catalog_, token);
+  }
+  auto outputs = [&](const std::string * session) {
+    GDEFCORE_Request * req = NULL;
+    char * bytes = NULL;
+    size_t n = 0;
+    std::string out;
+    EXPECT_EQ(GDEFCORE_OK,
+        gdefcore_request_create(storage_, sizeof storage_, 0, 0, NULL, &req));
+    if (session != NULL) {
+      EXPECT_EQ(GDEFCORE_OK,
+          gdefcore_message_bind(catalog_, req, keyring, root_, sizeof root_,
+              session->data(), session->size()));
+    }
+    if (gdefcore_render_page(catalog_, NULL, req, "/", 1, GDEFCORE_RENDER_PAGE_FUEL,
+            &bytes, &n) == GDEFCORE_OK) {
+      out = std::string(bytes, n);
+      gdefcore_text_free(catalog_, bytes);
+    }
+    gdefcore_request_destroy(req);
+    return out;
+  };
+  {
+    GDEFCORE_Request * req = NULL;
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_request_create(storage_, sizeof storage_, 0, 0, NULL, &req));
+    ASSERT_EQ(GDEFCORE_OK,
+        gdefcore_message_bind(catalog_, req, keyring, root_, sizeof root_,
+            session_.data(), session_.size()));
+    ASSERT_EQ(GDEFCORE_OK, gdefcore_message_post(catalog_, req, GDEFCORE_MESSAGE_STATUS,
+                               kCanary, strlen(kCanary)));
+    gdefcore_request_destroy(req);
+  }
+  auto has = [](const std::string & text, const char * canary) {
+    return text.find(canary) != std::string::npos;
+  };
+  /* The visitor, and a different session of the same account. */
+  const bool open = strcmp(Plant(), "message-open") == 0;
+  std::string visitor = outputs(open ? &session_ : NULL);
+  EXPECT_FALSE(has(visitor, kCanary)) << visitor;
+  std::string different = outputs(&other);
+  EXPECT_FALSE(has(different, kCanary)) << different;
+  /* The tenant's data set holds neither the text nor the session. */
+  {
+    uint8_t * zip = NULL;
+    size_t zip_len = 0;
+    GARC_Stream * stream = NULL;
+    GARC_Archive * archive = NULL;
+    GARC_Limits alimits;
+    const GARC_Member * member = NULL;
+    std::string all;
+    ASSERT_EQ(GDEFSTOR_OK, gdefstor_snapshot_export(site_, (const char *)storage_,
+                               sizeof storage_, NULL, &zip, &zip_len));
+    ASSERT_EQ(GARC_OK, garc_stream_create_memory(zip, zip_len, &stream));
+    garc_limits_default(&alimits);
+    ASSERT_EQ(GARC_OK, garc_open(stream, &alimits, &archive));
+    while (garc_next(archive, &member) == GARC_OK) {
+      std::vector<char> buf(member->size + 1);
+      size_t got = 0;
+      size_t total = 0;
+      while (total < member->size &&
+             garc_read_member(archive, buf.data() + total, member->size - total, &got) ==
+                 GARC_OK &&
+             got > 0) {
+        total += got;
+      }
+      all.append(buf.data(), total);
+    }
+    garc_close(archive);
+    garc_stream_destroy(stream);
+    gdefstor_bytes_free(NULL, zip);
+    EXPECT_FALSE(has(all, kCanary));
+    EXPECT_FALSE(has(all, session_.c_str()));
+    EXPECT_FALSE(all.empty()) << "CONTROL: the snapshot was read";
+  }
+  /* The control: the session it was left is shown it, once. */
+  std::string owner = outputs(&session_);
+  EXPECT_TRUE(has(owner, kCanary)) << owner;
+  EXPECT_FALSE(has(outputs(&session_), kCanary));
+}
+
 TEST_F(Site, Scanner) {
   char post[GDEFCORE_PUBLIC_ID_LEN + 1];
   char * page = NULL;
