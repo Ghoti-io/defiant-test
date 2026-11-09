@@ -960,7 +960,13 @@ STOR_CONFORMANCE := $(strip $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_LOOKUP_PATH) pk
 PLANT_LIB = $(STOR_CONFORMANCE)/plant-lib.sh
 
 check-archive: $(APP_DIR)/testHarness$(EXE_EXTENSION) $(APP_DIR)/readzip ## Plants turn the hostile-archive tests red
+ifeq ($(OS_NAME), Linux)
 	@LD_LIBRARY_PATH="$(TEST_LD_PATH)" GDEFTEST_READZIP="$(APP_DIR)/readzip" GHOTI_PLANT_LIB=$(PLANT_LIB) tools/check-archive.sh "$(APP_DIR)/testHarness$(EXE_EXTENSION)" "$(DEFIANT_CORE_SRC)" "$(DEFIANT_STORAGE_SRC)" "$(MAKE)" "$(BUILD_DIR)" $(if $(PREFIX),PREFIX=$(PREFIX))
+else
+# Each plant is a rebuilt copy of the two libraries that the test program loads in place of the real ones
+# through LD_LIBRARY_PATH; a Windows build links them in, so no planted copy could be loaded.
+	@printf "check-archive: skipped (Linux only: the planted copies are loaded through LD_LIBRARY_PATH)\n"
+endif
 
 # The source trees the unsafe-list lint reads: this library and its siblings.
 DEFIANT_LINT_ROOTS ?= . $(DEFIANT_CORE_SRC) $(DEFIANT_STORAGE_SRC) ../defiant-storage-memory ../defiant-storage-sqlite ../defiant-web

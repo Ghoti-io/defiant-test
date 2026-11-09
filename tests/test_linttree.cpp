@@ -40,6 +40,8 @@
 
 #include <ghoti.io/defiant-test/defiant-test.h>
 
+#include "portable.h"
+
 #include <gtest/gtest.h>
 
 #include <stdio.h>
@@ -124,7 +126,7 @@ void WalkRoot(const fs::path & root, Walk * out) {
               &item) == GDEFTEST_OK) {
         break;
       }
-      out->hits.push_back(entry.path().string() + ":" +
+      out->hits.push_back(entry.path().generic_string() + ":" +
           std::to_string(base_line + line) + ": item " + std::to_string(item) +
           " (" + Token(item) + ") without the marker");
       /* Move past the offending line. */
@@ -165,9 +167,8 @@ std::vector<fs::path> Roots() {
 
 TEST(LintTree, Control) {
   char tmpl[512];
-  const char * tmp = getenv("TMPDIR");
   snprintf(tmpl, sizeof tmpl, "%s/gdeftest-linttree-XXXXXX",
-      tmp != NULL && tmp[0] != '\0' ? tmp : "/tmp");
+      PortableTempDir().c_str());
   char * made = mkdtemp(tmpl);
   ASSERT_NE(made, nullptr);
   fs::path root(made);
@@ -203,7 +204,7 @@ TEST(LintTree, Control) {
   std::set<std::string> seen(walk.hits.begin(), walk.hits.end());
   for (int item = 1; item <= 5; item++) {
     std::string want = (root / "src" / ("planted" + std::to_string(item) + ".c"))
-                           .string() + ":3: item " + std::to_string(item);
+                           .generic_string() + ":3: item " + std::to_string(item);
     bool found = false;
     for (const std::string & hit : seen) {
       if (hit.rfind(want, 0) == 0) {
